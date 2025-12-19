@@ -1,0 +1,1 @@
+print("Telegramm-1C bot is starting inside Docker...")
