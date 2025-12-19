@@ -10,13 +10,13 @@ from telethon.tl.types import InputPhoneContact
 
 app = Quart(__name__)
 
-# --- НАСТРОЙКИ (забираем из переменных окружения) ---
-# Если переменная не найдена, используем None или дефолтное значение
-API_ID = os.getenv('TG_API_ID') 
+# --- РќРђРЎРўР РћР™РљР (Р·Р°Р±РёСЂР°РµРј РёР· РїРµСЂРµРјРµРЅРЅС‹С… РѕРєСЂСѓР¶РµРЅРёСЏ) ---
+# Р•СЃР»Рё РїРµСЂРµРјРµРЅРЅР°СЏ РЅРµ РЅР°Р№РґРµРЅР°, РёСЃРїРѕР»СЊР·СѓРµРј None РёР»Рё РґРµС„РѕР»С‚РЅРѕРµ Р·РЅР°С‡РµРЅРёРµ
+API_ID = os.getenv('TG_API_ID')
 API_HASH = os.getenv('TG_API_HASH')
 
-# Пути можно оставить такими или тоже вынести, если они меняются
-SESSION_PATH = os.getenv('TG_SESSION_PATH', '/app/GenaAPI') 
+# РџСѓС‚Рё РјРѕР¶РЅРѕ РѕСЃС‚Р°РІРёС‚СЊ С‚Р°РєРёРјРё РёР»Рё С‚РѕР¶Рµ РІС‹РЅРµСЃС‚Рё, РµСЃР»Рё РѕРЅРё РјРµРЅСЏСЋС‚СЃСЏ
+SESSION_PATH = os.getenv('TG_SESSION_PATH', '/app/GenaAPI')
 TEMP_STORAGE = os.getenv('TG_TEMP_STORAGE', '/tmp/telegram_files')
 
 os.makedirs(TEMP_STORAGE, exist_ok=True)
@@ -103,7 +103,7 @@ async def send_url_telegram():
 async def get_messages():
     data = await request.get_json() or {}
     limit_dialogs = int(data.get("limit_dialogs", 10))
-    only_unread = data.get("only_unread", False) 
+    only_unread = data.get("only_unread", False)
     client = await get_client()
     try:
         if not await client.is_user_authorized():
