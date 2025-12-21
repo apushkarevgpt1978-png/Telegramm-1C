@@ -66,7 +66,13 @@ async def update_log_status(row_id, status, tg_id=None, error=None):
 # --- КЛИЕНТ ТЕЛЕГРАМ ---
 
 async def get_client():
-    client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
+    # Добавляем получение данных из Portainer
+    api_id = int(os.environ.get('API_ID'))
+    api_hash = os.environ.get('API_HASH')
+    session_path = os.environ.get('TG_SESSION_PATH')
+    
+    # Создаем клиент, используя эти данные
+    client = TelegramClient(session_path, api_id, api_hash)
     await client.connect()
     return client
 
