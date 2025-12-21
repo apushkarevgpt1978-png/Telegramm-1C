@@ -217,9 +217,15 @@ async def debug_db():
 
 @app.route('/auth_phone', methods=['POST'])
 async def auth_phone():
+    # Добавляем эти строки, чтобы функция видела настройки из Portainer:
+    api_id = int(os.environ.get('API_ID'))
+    api_hash = os.environ.get('API_HASH')
+    session_path = os.environ.get('TG_SESSION_PATH')
+    
     data = await request.get_json()
     phone = data.get('phone')
-    client = TelegramClient(TG_SESSION_PATH, API_ID, API_HASH)
+    
+    client = TelegramClient(session_path, api_id, api_hash)
     await client.connect()
     send_code = await client.send_code_request(phone)
     await client.disconnect()
@@ -227,11 +233,16 @@ async def auth_phone():
 
 @app.route('/auth_code', methods=['POST'])
 async def auth_code():
+    api_id = int(os.environ.get('API_ID'))
+    api_hash = os.environ.get('API_HASH')
+    session_path = os.environ.get('TG_SESSION_PATH')
+    
     data = await request.get_json()
     phone = data.get('phone')
     code = data.get('code')
     hash = data.get('hash')
-    client = TelegramClient(TG_SESSION_PATH, API_ID, API_HASH)
+    
+    client = TelegramClient(session_path, api_id, api_hash)
     await client.connect()
     await client.sign_in(phone, code, phone_code_hash=hash)
     me = await client.get_me()
