@@ -213,5 +213,28 @@ async def debug_db():
             rows = await cursor.fetchall()
             return jsonify([dict(row) for row in rows])
 
+@app.route('/auth_phone', methods=['POST'])
+async def auth_phone():
+    data = await request.get_json()
+    phone = data.get('phone')
+    client = TelegramClient(TG_SESSION_PATH, API_ID, API_HASH)
+    await client.connect()
+    send_code = await client.send_code_request(phone)
+    await client.disconnect()
+    return jsonify({"status": "code_sent", "phone_code_hash": send_code.phone_code_hash})
+
+@app.route('/auth_code', methods=['POST'])
+async def auth_code():
+    data = await request.get_json()
+    phone = data.get('phone')
+    code = data.get('code')
+    hash = data.get('hash')
+    client = TelegramClient(TG_SESSION_PATH, API_ID, API_HASH)
+    await client.connect()
+    await client.sign_in(phone, code, phone_code_hash=hash)
+    me = await client.get_me()
+    await client.disconnect()
+    return jsonify({"status": "success", "user": me.first_name})
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
