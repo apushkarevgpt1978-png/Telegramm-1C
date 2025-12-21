@@ -66,13 +66,18 @@ async def update_log_status(row_id, status, tg_id=None, error=None):
 # --- КЛИЕНТ ТЕЛЕГРАМ ---
 
 async def get_client():
-    # Добавляем получение данных из Portainer
-    api_id = int(os.environ.get('API_ID'))
+    # Мы берем данные из настроек контейнера (Environment Variables)
+    # Если их нет в Portainer, бот упадет здесь с понятной ошибкой
+    api_id = os.environ.get('API_ID')
     api_hash = os.environ.get('API_HASH')
-    session_path = os.environ.get('TG_SESSION_PATH')
-    
-    # Создаем клиент, используя эти данные
-    client = TelegramClient(session_path, api_id, api_hash)
+    # В твоем логе написано SESSION_PATH, используем именно это имя
+    session_path = os.environ.get('TG_SESSION_PATH') or os.environ.get('SESSION_PATH')
+
+    if not api_id or not api_hash:
+        raise ValueError("Ошибка: API_ID или API_HASH не заданы в настройках Portainer!")
+
+    # Создаем клиент
+    client = TelegramClient(session_path, int(api_id), api_hash)
     await client.connect()
     return client
 
