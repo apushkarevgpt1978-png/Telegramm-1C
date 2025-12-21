@@ -204,5 +204,14 @@ async def setup():
     """Запуск инициализации БД перед началом работы сервера"""
     await init_db()
 
+@app.route('/debug_db', methods=['GET'])
+async def debug_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Эта магия позволит видеть названия колонок, а не просто список
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM outbound_logs ORDER BY id DESC LIMIT 20") as cursor:
+            rows = await cursor.fetchall()
+            return jsonify([dict(row) for row in rows])
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
