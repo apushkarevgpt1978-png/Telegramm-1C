@@ -207,11 +207,13 @@ async def setup():
 @app.route('/debug_db', methods=['GET'])
 async def debug_db():
     async with aiosqlite.connect(DB_PATH) as db:
-        # Эта магия позволит видеть названия колонок, а не просто список
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM outbound_logs ORDER BY id DESC LIMIT 20") as cursor:
+        async with db.execute("SELECT * FROM outbound_logs ORDER BY id DESC LIMIT 50") as cursor:
             rows = await cursor.fetchall()
-            return jsonify([dict(row) for row in rows])
+            # Превращаем в список словарей
+            data = [dict(row) for row in rows]
+            # Отправляем именно как JSON-ответ
+            return jsonify(data)
 
 @app.route('/auth_phone', methods=['POST'])
 async def auth_phone():
