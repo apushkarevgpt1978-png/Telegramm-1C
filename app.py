@@ -75,6 +75,10 @@ async def start_listener():
 
     @tg.on(events.NewMessage(incoming=True))
     async def handler(event):
+        # Добавляем проверку: только личные сообщения (не каналы и не группы)
+        if not event.is_private:
+            return 
+
         sender = await event.get_sender()
         # Получаем номер и очищаем его от всего лишнего
         sender_phone = str(getattr(sender, 'phone', '')).lstrip('+').strip()
