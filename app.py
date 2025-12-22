@@ -18,8 +18,8 @@ MANAGERS = os.environ.get('MANAGERS_PHONES', '').split(',')
 
 # Настройки хранилища файлов
 FILES_DIR = '/app/files'
-# ВНИМАНИЕ: Замени твой_айпи на реальный IP сервера (например 192.168.1.100)
-BASE_URL = 'http://твой_айпи:5000/get_file'
+
+BASE_URL = 'http://192.168.121.99:5000/get_file'
 
 if not os.path.exists(FILES_DIR):
     os.makedirs(FILES_DIR)
