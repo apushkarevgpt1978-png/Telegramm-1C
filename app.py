@@ -207,34 +207,43 @@ async def send_telegram():
 
 @app.route('/send_file', methods=['POST'])
 async def send_file_from_1c():
+    # Твоя 1С шлет JSON, поэтому берем данные так:
     data = await request.get_json()
     
-    phone = str(data.get("phone", "")).lstrip('+').strip()
-    file_url = data.get("file")  # Здесь придет "https://files.masterovit.ru/..."
-    caption = data.get("text", "") # Текст сообщения
+    if not data:
+        return jsonify({"error": "Empty JSON"}), 400
 
+    # Вытаскиваем поля из твоего ПараметрыОтбора
+    phone = str(data.get("phone", "")).lstrip('+').strip()
+    file_url = data.get("file") # Ссылка https://files.masterovit.ru...
+    caption = data.get("text", "") # Текст из ПолеВводаТекста
+
+    # Проверка заполнения
     if not phone or not file_url:
-        return jsonify({"error": "phone and file (url) are required"}), 400
+        return jsonify({
+            "error": "phone and file are required",
+            "received_data": data # Это поможет нам увидеть, что реально пришло
+        }), 400
 
     tg = await get_client()
     try:
-        # Telegram сам скачает файл по ссылке и отправит клиенту
+        # Telegram сам скачает файл по ссылке и отправит
         sent = await tg.send_file(phone, file_url, caption=caption)
         
+        # Записываем в базу как PENDING
         await log_to_db(
             source="1C", 
             phone=phone, 
-            text=caption or f"Файл по ссылке", 
+            text=caption or "Файл", 
             sender="system_1c", 
-            f_url=file_url, # Сохраняем ссылку в нашей базе для истории
+            f_url=file_url, 
+            status="pending", # <--- Чтобы 1С потом подтвердила получение
             direction="out", 
-            tg_id=sent.id,
-            status="pending"
+            tg_id=sent.id
         )
         
-        return jsonify({"status": "sent", "tg_id": sent.id}), 200
+        return jsonify({"status": "pending", "tg_id": sent.id}), 200
     except Exception as e:
-        print(f"DEBUG Error sending file from URL: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/debug_db', methods=['GET'])
