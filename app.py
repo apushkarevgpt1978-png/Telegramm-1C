@@ -207,28 +207,28 @@ async def send_telegram():
 
 @app.route('/send_file', methods=['POST'])
 async def send_file_from_1c():
-    # Получаем данные формы (текст и телефон) и сам файл
+    # Получаем данные формы и сам файл
     form = await request.form
     files = await request.files
     
     phone = form.get("phone", "").lstrip('+')
-    caption = form.get("caption", "")  # Текст сообщения под файлом
-    file_obj = files.get("file")       # Сама картинка или документ
+    caption = form.get("caption", "")  # Текст под файлом
+    file_obj = files.get("file")       # Двоичные данные файла
     
     if not phone or not file_obj:
         return jsonify({"error": "phone and file are required"}), 400
     
     tg = await get_client()
     try:
-        # 1. Сохраняем файл во временную папку, чтобы Telethon мог его отправить
+        # 1. Сохраняем файл временно
         filename = f"out_{uuid.uuid4()}_{file_obj.filename}"
         temp_path = os.path.join(FILES_DIR, filename)
         await file_obj.save(temp_path)
         
-        # 2. Отправляем в Telegram
+        # 2. Отправляем файл в Telegram
         sent = await tg.send_file(phone, temp_path, caption=caption)
         
-        # 3. Логируем в базу, чтобы в 1С вернулось подтверждение
+        # 3. Записываем в базу, чтобы 1С увидела подтверждение в fetch_new
         await log_to_db(
             source="1C", 
             phone=phone, 
@@ -236,12 +236,11 @@ async def send_file_from_1c():
             sender="system_1c", 
             direction="out", 
             tg_id=sent.id,
-            status="pending" # Чтобы 1С могла подтвердить отправку через fetch_new
+            status="pending"
         )
         
         return jsonify({"status": "sent", "tg_id": sent.id}), 200
     except Exception as e:
-        print(f"DEBUG Error sending file: {e}")
         return jsonify({"error": str(e)}), 500
 
 @app.route('/debug_db', methods=['GET'])
