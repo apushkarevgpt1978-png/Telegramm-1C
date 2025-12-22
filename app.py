@@ -45,7 +45,8 @@ async def init_db():
 
 async def log_to_db(source, phone, text, status='sent', direction='out', tg_id=None, error=None, file_url=None):
     async with aiosqlite.connect(DB_PATH) as db:
-        # Здесь ровно 10 колонок и 10 знаков вопроса
+        # 1. source, 2. phone, 3. message_text, 4. file_url, 5. status, 
+        # 6. direction, 7. tg_message_id, 8. error_text, 9. created_at, 10. sent_at
         await db.execute("""
             INSERT INTO outbound_logs 
             (source, phone, message_text, file_url, status, direction, tg_message_id, error_text, created_at, sent_at) 
