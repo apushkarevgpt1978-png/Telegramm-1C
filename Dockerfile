@@ -10,4 +10,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY --chown=appuser app.py .
 
 EXPOSE 5000
+
+RUN rm -f /app/data/gateway_messages.db
 CMD ["python", "app.py"]
