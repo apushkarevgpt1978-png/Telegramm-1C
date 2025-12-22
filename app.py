@@ -82,7 +82,6 @@ async def log_to_db(source, phone, text, sender=None, file_url=None, messenger='
 # --- ФУНКЦИЯ СОХРАНЕНИЯ ФАЙЛА ---
 async def save_tg_media(event):
     if event.message.media:
-        # Пытаемся определить расширение
         file_ext = ".jpg" 
         if hasattr(event.message.media, 'document'):
             for attr in event.message.media.document.attributes:
@@ -92,9 +91,12 @@ async def save_tg_media(event):
         filename = f"{uuid.uuid4()}{file_ext}"
         path = os.path.join(FILES_DIR, filename)
         
-        # Скачиваем файл из TG в локальную папку
+        # Скачиваем файл
         await event.message.download_media(file=path)
-        return f"{BASE_URL}/{filename}"
+        
+        # Генерируем полную ссылку
+        full_url = f"{BASE_URL}/{filename}"
+        return full_url # <--- Обязательно возвращаем значение!
     return None
 
 # --- СЛУШАТЕЛЬ ТЕЛЕГРАМ ---
@@ -123,14 +125,25 @@ async def start_listener():
                 except Exception as e:
                     await event.reply(f"❌ Ошибка: {str(e)}")
         else:
-            # Обработка входящего от клиента (с файлом)
-            f_url = await save_tg_media(event)
+            print(f"DEBUG: Получено сообщение от клиента {sender_phone}. Медиа: {bool(event.message.media)}")
+            
+            # Важно: Сначала получаем URL файла
+            f_url = None
+            if event.message.media:
+                try:
+                    f_url = await save_tg_media(event)
+                    print(f"DEBUG: Файл сохранен, URL: {f_url}")
+                except Exception as file_err:
+                    print(f"DEBUG: Ошибка сохранения файла: {file_err}")
+
+            # Только потом пишем в базу
             await log_to_db(
                 source="Client", 
                 phone=sender_phone or "Unknown", 
                 sender=sender_phone, 
-                text=raw_text or "[Файл/Медиа]", 
-                file_url=f_url,
+                text=raw_text or "[Медиа-файл]", 
+                file_url=f_url, # Здесь теперь точно должен быть URL или None
+                status="pending",
                 direction="in", 
                 tg_id=event.id
             )
