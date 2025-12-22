@@ -2,8 +2,9 @@ import os
 import asyncio
 import aiosqlite
 import re
+import uuid
 from datetime import datetime
-from quart import Quart, request, jsonify
+from quart import Quart, request, jsonify, send_from_directory
 from telethon import TelegramClient, events
 
 app = Quart(__name__)
@@ -15,6 +16,13 @@ SESSION_PATH = os.environ.get('TG_SESSION_PATH', '/app/data/GenaAPI')
 DB_PATH = os.environ.get('DB_PATH', '/app/data/gateway_messages.db')
 MANAGERS = os.environ.get('MANAGERS_PHONES', '').split(',')
 
+# Настройки хранилища файлов
+FILES_DIR = '/app/files'
+BASE_URL = 'http://192.168.121.99:5000/get_file' 
+
+if not os.path.exists(FILES_DIR):
+    os.makedirs(FILES_DIR)
+
 client = None
 
 async def get_client():
@@ -24,7 +32,7 @@ async def get_client():
         await client.connect()
     return client
 
-# --- ИНИЦИАЛИЗАЦИЯ БД С МИГРАЦИЯМИ ---
+# --- ИНИЦИАЛИЗАЦИЯ БД ---
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
@@ -45,7 +53,6 @@ async def init_db():
             )
         """)
         
-        # Проверка существующих колонок (миграция)
         cursor = await db.execute("PRAGMA table_info(outbound_logs)")
         cols = [row[1] for row in await cursor.fetchall()]
         
@@ -55,20 +62,40 @@ async def init_db():
             await db.execute("ALTER TABLE outbound_logs ADD COLUMN messenger TEXT DEFAULT 'tg'")
         if 'direction' not in cols:
             await db.execute("ALTER TABLE outbound_logs ADD COLUMN direction TEXT")
+        if 'file_url' not in cols:
+            await db.execute("ALTER TABLE outbound_logs ADD COLUMN file_url TEXT")
             
         await db.commit()
 
-# --- УНИВЕРСАЛЬНОЕ ЛОГИРОВАНИЕ ---
-async def log_to_db(source, phone, text, sender=None, messenger='tg', status='pending', direction='out', tg_id=None, error=None):
+# --- ЛОГИРОВАНИЕ ---
+async def log_to_db(source, phone, text, sender=None, file_url=None, messenger='tg', status='pending', direction='out', tg_id=None, error=None):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             INSERT INTO outbound_logs 
-            (source, phone, sender_number, messenger, message_text, status, direction, tg_message_id, error_text, created_at) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (source, phone, sender_number, messenger, message_text, file_url, status, direction, tg_message_id, error_text, created_at) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            source, phone, sender, messenger, text, status, direction, tg_id, error, datetime.now()
+            source, phone, sender, messenger, text, file_url, status, direction, tg_id, error, datetime.now()
         ))
         await db.commit()
+
+# --- ФУНКЦИЯ СОХРАНЕНИЯ ФАЙЛА ---
+async def save_tg_media(event):
+    if event.message.media:
+        # Пытаемся определить расширение
+        file_ext = ".jpg" 
+        if hasattr(event.message.media, 'document'):
+            for attr in event.message.media.document.attributes:
+                if hasattr(attr, 'file_name'):
+                    file_ext = os.path.splitext(attr.file_name)[1]
+        
+        filename = f"{uuid.uuid4()}{file_ext}"
+        path = os.path.join(FILES_DIR, filename)
+        
+        # Скачиваем файл из TG в локальную папку
+        await event.message.download_media(file=path)
+        return f"{BASE_URL}/{filename}"
+    return None
 
 # --- СЛУШАТЕЛЬ ТЕЛЕГРАМ ---
 async def start_listener():
@@ -78,14 +105,12 @@ async def start_listener():
 
     @tg.on(events.NewMessage(incoming=True))
     async def handler(event):
-        if not event.is_private:
-            return 
+        if not event.is_private: return 
 
         sender = await event.get_sender()
         sender_phone = str(getattr(sender, 'phone', '')).lstrip('+').strip()
         raw_text = event.raw_text.strip()
         
-        # 1. Если пишет МЕНЕДЖЕР
         if sender_phone in managers_list:
             match = re.match(r'^#(\d+)/(.*)', raw_text, re.DOTALL)
             if match:
@@ -93,29 +118,19 @@ async def start_listener():
                 message_to_send = match.group(2).strip()
                 try:
                     sent = await tg.send_message(target_phone, message_to_send)
-                    await log_to_db(
-                        source="Manager", 
-                        phone=target_phone, 
-                        sender=sender_phone, 
-                        text=message_to_send, 
-                        status="pending", 
-                        direction="out", 
-                        tg_id=sent.id
-                    )
+                    await log_to_db(source="Manager", phone=target_phone, sender=sender_phone, text=message_to_send, direction="out", tg_id=sent.id)
                     await event.reply(f"✅ Отправлено клиенту {target_phone}")
                 except Exception as e:
                     await event.reply(f"❌ Ошибка: {str(e)}")
-            else:
-                await event.reply("⚠️ Формат: `#номер/текст`")
-        
-        # 2. Если пишет КЛИЕНТ
         else:
+            # Обработка входящего от клиента (с файлом)
+            f_url = await save_tg_media(event)
             await log_to_db(
                 source="Client", 
                 phone=sender_phone or "Unknown", 
                 sender=sender_phone, 
-                text=raw_text, 
-                status="pending", 
+                text=raw_text or "[Файл/Медиа]", 
+                file_url=f_url,
                 direction="in", 
                 tg_id=event.id
             )
@@ -127,17 +142,19 @@ async def startup():
 
 # --- ЭНДПОИНТЫ API ---
 
+@app.route('/get_file/<filename>')
+async def get_file(filename):
+    return await send_from_directory(FILES_DIR, filename)
+
 @app.route('/send', methods=['POST'])
 async def send_telegram():
     data = await request.get_json()
     phone = str(data.get("phone", "")).lstrip('+')
     text = data.get("text", "")
-    
     tg = await get_client()
     try:
         sent = await tg.send_message(phone, text)
-        # Теперь тоже ставим pending, чтобы 1С забрала подтверждение
-        await log_to_db("1C", phone, text, sender="system_1c", status="pending", direction="out", tg_id=sent.id)
+        await log_to_db("1C", phone, text, sender="system_1c", direction="out", tg_id=sent.id)
         return jsonify({"status": "pending", "tg_id": sent.id}), 200
     except Exception as e:
         await log_to_db("1C", phone, text, sender="system_1c", status="error", error=str(e))
@@ -150,13 +167,11 @@ async def fetch_new():
         async with db.execute("SELECT * FROM outbound_logs WHERE status = 'pending'") as cursor:
             rows = await cursor.fetchall()
             data = [dict(row) for row in rows]
-        
         if data:
             ids = [row['id'] for row in data]
             placeholders = ', '.join(['?'] * len(ids))
             await db.execute(f"UPDATE outbound_logs SET status = 'delivered_to_1c' WHERE id IN ({placeholders})", ids)
             await db.commit()
-        
         return jsonify(data)
 
 @app.route('/debug_db', methods=['GET'])
