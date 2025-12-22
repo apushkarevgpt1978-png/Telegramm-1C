@@ -1,30 +1,39 @@
-from quart import Quart, request, jsonify, send_file
 import os
+import asyncio
 import hashlib
 import mimetypes
-import asyncio
 import aiosqlite
 from datetime import datetime
-from telethon import TelegramClient
-from telethon.tl.functions.contacts import ImportContactsRequest
-from telethon.tl.types import InputPhoneContact
+from quart import Quart, request, jsonify, send_file
+from telethon import TelegramClient, events
 
 app = Quart(__name__)
 
-# --- НАСТРОЙКИ (через переменные окружения) ---
-API_ID = os.getenv('TG_API_ID')
-API_HASH = os.getenv('TG_API_HASH')
-SESSION_PATH = os.getenv('TG_SESSION_PATH', '/app/GenaAPI')
-TEMP_STORAGE = os.getenv('TG_TEMP_STORAGE', '/tmp/telegram_files')
-DB_PATH = os.getenv('DB_PATH', '/app/data/gateway_messages.db')
+# --- НАСТРОЙКИ ---
+API_ID = int(os.environ.get('API_ID', 0))
+API_HASH = os.environ.get('API_HASH', '')
+SESSION_PATH = os.environ.get('TG_SESSION_PATH', '/app/data/GenaAPI')
+DB_PATH = os.environ.get('DB_PATH', '/app/data/gateway_messages.db')
+TEMP_STORAGE = os.environ.get('TG_TEMP_STORAGE', '/tmp/telegram_files')
+MANAGERS = os.environ.get('MANAGERS_PHONES', '').split(',')
 
 os.makedirs(TEMP_STORAGE, exist_ok=True)
 
-# --- БЛОК РАБОТЫ С БАЗОЙ ДАННЫХ ---
+# Глобальный клиент
+client = None
+
+async def get_client():
+    global client
+    if client is None:
+        client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
+        await client.connect()
+    return client
+
+# --- РАБОТА С БАЗОЙ ---
 
 async def init_db():
-    """Создание таблицы для логов при запуске приложения"""
     async with aiosqlite.connect(DB_PATH) as db:
+        # Создаем таблицу с учетом новых полей
         await db.execute("""
             CREATE TABLE IF NOT EXISTS outbound_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -34,230 +43,128 @@ async def init_db():
                 file_url TEXT,
                 status TEXT,
                 tg_message_id INTEGER,
+                direction TEXT,
                 error_text TEXT,
                 created_at DATETIME,
                 sent_at DATETIME
             )
         """)
+        # Проверка и добавление колонки direction для старых баз
+        cursor = await db.execute("PRAGMA table_info(outbound_logs)")
+        cols = [row[1] for row in await cursor.fetchall()]
+        if 'direction' not in cols:
+            await db.execute("ALTER TABLE outbound_logs ADD COLUMN direction TEXT DEFAULT 'out'")
         await db.commit()
 
-async def log_to_db(source, phone, text, file_url=None):
-    """Первичная фиксация запроса в статусе pending"""
+async def log_to_db(source, phone, text, file_url=None, status='pending', direction='out', tg_id=None, error=None):
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute("""
             INSERT INTO outbound_logs 
-            (source, phone, message_text, file_url, status, created_at) 
-            VALUES (?, ?, ?, ?, ?, ?)
-        """, (source, phone, text, file_url, 'pending', datetime.now()))
+            (source, phone, message_text, file_url, status, direction, tg_message_id, error_text, created_at, sent_at) 
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (source, phone, text, file_url, status, direction, tg_id, error, datetime.now(), datetime.now() if status == 'sent' else None))
         row_id = cursor.lastrowid
         await db.commit()
         return row_id
 
-async def update_log_status(row_id, status, tg_id=None, error=None):
-    """Обновление записи результатом отправки"""
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("""
-            UPDATE outbound_logs 
-            SET status = ?, tg_message_id = ?, error_text = ?, sent_at = ? 
-            WHERE id = ?
-        """, (status, tg_id, error, datetime.now() if status == 'sent' else None, row_id))
-        await db.commit()
+# --- ОБРАБОТКА МЕДИА ---
 
-# --- КЛИЕНТ ТЕЛЕГРАМ ---
-
-async def get_client():
-    # Мы берем данные из настроек контейнера (Environment Variables)
-    # Если их нет в Portainer, бот упадет здесь с понятной ошибкой
-    api_id = os.environ.get('API_ID')
-    api_hash = os.environ.get('API_HASH')
-    # В твоем логе написано SESSION_PATH, используем именно это имя
-    session_path = os.environ.get('TG_SESSION_PATH') or os.environ.get('SESSION_PATH')
-
-    if not api_id or not api_hash:
-        raise ValueError("Ошибка: API_ID или API_HASH не заданы в настройках Portainer!")
-
-    # Создаем клиент
-    client = TelegramClient(session_path, int(api_id), api_hash)
-    await client.connect()
-    return client
-
-async def process_media(client, message):
-    if not message.media:
-        return None
+async def process_media(message):
+    if not message.media: return None
     try:
         file_hash = hashlib.md5(f"{message.id}_{message.date.timestamp()}".encode()).hexdigest()[:8]
-        mime = None
-        if hasattr(message.media, 'document'):
-            mime = message.media.document.mime_type
-        elif hasattr(message.media, 'photo'):
-            mime = "image/jpeg"
-            
-        extension = mimetypes.guess_extension(mime) if mime else ""
-        if not extension and mime == "image/webapp": extension = ".png"
-
-        attr_name = "file"
-        if hasattr(message.media, 'document'):
-            for attr in message.media.document.attributes:
-                if hasattr(attr, 'file_name'):
-                    attr_name = os.path.splitext(attr.file_name)[0]
-                    break
-        
-        filename = f"{file_hash}_{attr_name}{extension}"
+        mime = message.media.document.mime_type if hasattr(message.media, 'document') else "image/jpeg"
+        ext = mimetypes.guess_extension(mime) or ".bin"
+        filename = f"{file_hash}_{message.id}{ext}"
         save_path = os.path.join(TEMP_STORAGE, filename)
         path = await client.download_media(message, file=save_path)
+        return f"http://{request.host}/download/{filename}" if path else None
+    except: return None
+
+# --- СЛУШАТЕЛЬ СОБЫТИЙ ---
+
+async def start_listener():
+    tg = await get_client()
+    
+    @tg.on(events.NewMessage)
+    async def handler(event):
+        # Пропускаем сообщения, которые мы только что отправили через /send (они уже в базе)
+        # Но ловим те, что отправлены ВРУЧНУЮ с телефона
+        sender = await event.get_sender()
+        phone = getattr(sender, 'phone', '').lstrip('+')
         
-        if path:
-            return {
-                "url": f"http://{request.host}/download/{filename}",
-                "filename": filename,
-                "filesize": os.path.getsize(path),
-                "mimetype": mime or "application/octet-stream"
-            }
-    except Exception as e:
-        print(f"Media error: {e}")
-    return None
+        # Определяем роль
+        if event.out:
+            if phone in MANAGERS:
+                source, direction = "Manager", "out"
+            else:
+                return # Это сообщение от /send, игнорируем дубль
+        else:
+            source, direction = "Client", "in"
+
+        # Сохраняем входящее или ручной ответ менеджера
+        await log_to_db(
+            source=source,
+            phone=phone or "Unknown",
+            text=event.raw_text,
+            direction=direction,
+            status="received",
+            tg_id=event.id
+        )
 
 # --- ЭНДПОИНТЫ ---
+
+@app.before_serving
+async def startup():
+    await init_db()
+    asyncio.create_task(start_listener())
 
 @app.route('/send', methods=['POST'])
 async def send_telegram():
     data = await request.get_json()
-    phone = data.get("phone", "").strip()
-    text = data.get("text", "").strip()
-    source = data.get("source", "1C")
-
-    # Регистрация в БД перед отправкой
-    db_row_id = await log_to_db(source, phone, text)
-
-    client = await get_client()
+    phone, text = data.get("phone", ""), data.get("text", "")
+    file_url = data.get("file_url") # Поддержка отправки файлов через основной эндпоинт
+    
+    tg = await get_client()
     try:
-        if not await client.is_user_authorized():
-            await update_log_status(db_row_id, "error", error="Auth required")
-            return jsonify({"error": "Auth required"}), 401
+        if file_url:
+            sent = await tg.send_file(phone, file_url, caption=text)
+        else:
+            sent = await tg.send_message(phone, text)
         
-        sent = await client.send_message(phone, text)
-        await update_log_status(db_row_id, "sent", tg_id=sent.id)
-        
-        return jsonify({"status": "sent", "db_id": db_row_id, "tg_id": sent.id}), 200
+        await log_to_db("1C", phone, text, file_url=file_url, status="sent", tg_id=sent.id)
+        return jsonify({"status": "sent", "tg_id": sent.id}), 200
     except Exception as e:
-        await update_log_status(db_row_id, "error", error=str(e))
-        return jsonify({"status": "error", "message": str(e)}), 500
-    finally:
-        await client.disconnect()
-
-@app.route('/send_url', methods=['POST'])
-async def send_url_telegram():
-    data = await request.get_json()
-    phone = data.get("phone", "").strip()
-    file_url = data.get("file_url", "").strip()
-    caption = data.get("caption", "").strip()
-    source = data.get("source", "1C")
-
-    # Регистрация в БД перед отправкой
-    db_row_id = await log_to_db(source, phone, caption, file_url=file_url)
-
-    client = await get_client()
-    try:
-        if not await client.is_user_authorized():
-            await update_log_status(db_row_id, "error", error="Auth required")
-            return jsonify({"error": "Auth required"}), 401
-        
-        sent = await client.send_file(phone, file_url, caption=caption)
-        await update_log_status(db_row_id, "sent", tg_id=sent.id)
-        
-        return jsonify({"status": "sent", "db_id": db_row_id, "tg_id": sent.id}), 200
-    except Exception as e:
-        await update_log_status(db_row_id, "error", error=str(e))
-        return jsonify({"status": "error", "message": str(e)}), 500
-    finally:
-        await client.disconnect()
-
-@app.route('/get_messages', methods=['POST'])
-async def get_messages():
-    data = await request.get_json() or {}
-    limit_dialogs = int(data.get("limit_dialogs", 10))
-    only_unread = data.get("only_unread", False)
-    client = await get_client()
-    try:
-        if not await client.is_user_authorized():
-            return jsonify({"error": "Auth required"}), 401
-        all_messages = []
-        async for dialog in client.iter_dialogs(limit=limit_dialogs):
-            if not dialog.is_user or dialog.id == 777000: continue
-            count_to_fetch = dialog.unread_count if only_unread else int(data.get("limit_messages", 5))
-            if count_to_fetch == 0 and only_unread: continue
-            read_max_id = getattr(dialog.dialog, 'read_inbox_max_id', 0)
-            async for msg in client.iter_messages(dialog.id, limit=count_to_fetch):
-                media_data = await process_media(client, msg)
-                all_messages.append({
-                    "message_id": msg.id,
-                    "sender_id": msg.sender_id,
-                    "chat_id": dialog.id,
-                    "chat_name": dialog.name,
-                    "text": msg.text or "",
-                    "date": msg.date.isoformat(),
-                    "is_out": msg.out,
-                    "is_unread": (not msg.out) and (msg.id > read_max_id),
-                    "media_info": media_data
-                })
-        return jsonify({"status": "success", "messages": all_messages}), 200
-    finally:
-        await client.disconnect()
-
-@app.route('/download/<filename>', methods=['GET'])
-async def download_file(filename):
-    path = os.path.join(TEMP_STORAGE, filename)
-    if os.path.exists(path): return await send_file(path)
-    return "File not found", 404
-
-@app.before_serving
-async def setup():
-    """Запуск инициализации БД перед началом работы сервера"""
-    await init_db()
+        await log_to_db("1C", phone, text, status="error", error=str(e))
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/debug_db', methods=['GET'])
 async def debug_db():
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM outbound_logs ORDER BY id DESC LIMIT 50") as cursor:
-            rows = await cursor.fetchall()
-            # Превращаем в список словарей
-            data = [dict(row) for row in rows]
-            # Отправляем именно как JSON-ответ
-            return jsonify(data)
+        async with db.execute("SELECT * FROM outbound_logs ORDER BY id DESC LIMIT 100") as cursor:
+            return jsonify([dict(row) for row in await cursor.fetchall()])
+
+@app.route('/download/<filename>', methods=['GET'])
+async def download_file(filename):
+    path = os.path.join(TEMP_STORAGE, filename)
+    return await send_file(path) if os.path.exists(path) else ("Not found", 404)
+
+# --- АВТОРИЗАЦИЯ ---
 
 @app.route('/auth_phone', methods=['POST'])
 async def auth_phone():
-    # Добавляем эти строки, чтобы функция видела настройки из Portainer:
-    api_id = int(os.environ.get('API_ID'))
-    api_hash = os.environ.get('API_HASH')
-    session_path = os.environ.get('TG_SESSION_PATH')
-    
     data = await request.get_json()
-    phone = data.get('phone')
-    
-    client = TelegramClient(session_path, api_id, api_hash)
-    await client.connect()
-    send_code = await client.send_code_request(phone)
-    await client.disconnect()
-    return jsonify({"status": "code_sent", "phone_code_hash": send_code.phone_code_hash})
+    tg = await get_client()
+    res = await tg.send_code_request(data.get('phone'))
+    return jsonify({"status": "code_sent", "hash": res.phone_code_hash})
 
 @app.route('/auth_code', methods=['POST'])
 async def auth_code():
-    api_id = int(os.environ.get('API_ID'))
-    api_hash = os.environ.get('API_HASH')
-    session_path = os.environ.get('TG_SESSION_PATH')
-    
     data = await request.get_json()
-    phone = data.get('phone')
-    code = data.get('code')
-    hash = data.get('hash')
-    
-    client = TelegramClient(session_path, api_id, api_hash)
-    await client.connect()
-    await client.sign_in(phone, code, phone_code_hash=hash)
-    me = await client.get_me()
-    await client.disconnect()
+    tg = await get_client()
+    await tg.sign_in(data.get('phone'), data.get('code'), phone_code_hash=data.get('hash'))
+    me = await tg.get_me()
     return jsonify({"status": "success", "user": me.first_name})
 
 if __name__ == '__main__':
