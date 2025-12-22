@@ -3,7 +3,7 @@ import asyncio
 import aiosqlite
 import re
 from datetime import datetime
-from quart import Quart, request, jsonify, send_file
+from quart import Quart, request, jsonify
 from telethon import TelegramClient, events
 
 app = Quart(__name__)
@@ -24,6 +24,7 @@ async def get_client():
         await client.connect()
     return client
 
+# --- ИНИЦИАЛИЗАЦИЯ БД С МИГРАЦИЯМИ ---
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
@@ -31,6 +32,8 @@ async def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 source TEXT,
                 phone TEXT,
+                sender_number TEXT,
+                messenger TEXT DEFAULT 'tg',
                 message_text TEXT,
                 file_url TEXT,
                 status TEXT,
@@ -41,33 +44,37 @@ async def init_db():
                 sent_at DATETIME
             )
         """)
+        
+        # Проверка существующих колонок (миграция)
+        cursor = await db.execute("PRAGMA table_info(outbound_logs)")
+        cols = [row[1] for row in await cursor.fetchall()]
+        
+        if 'sender_number' not in cols:
+            await db.execute("ALTER TABLE outbound_logs ADD COLUMN sender_number TEXT")
+        if 'messenger' not in cols:
+            await db.execute("ALTER TABLE outbound_logs ADD COLUMN messenger TEXT DEFAULT 'tg'")
+        if 'direction' not in cols:
+            await db.execute("ALTER TABLE outbound_logs ADD COLUMN direction TEXT")
+            
         await db.commit()
 
-async def log_to_db(source, phone, text, status='pending', direction='out', tg_id=None, error=None, file_url=None):
+# --- УНИВЕРСАЛЬНОЕ ЛОГИРОВАНИЕ ---
+async def log_to_db(source, phone, text, sender=None, messenger='tg', status='pending', direction='out', tg_id=None, error=None):
     async with aiosqlite.connect(DB_PATH) as db:
-        # Здесь статус по умолчанию изменен на 'pending' для надежности
         await db.execute("""
             INSERT INTO outbound_logs 
-            (source, phone, message_text, file_url, status, direction, tg_message_id, error_text, created_at, sent_at) 
+            (source, phone, sender_number, messenger, message_text, status, direction, tg_message_id, error_text, created_at) 
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            source,          # 1
-            phone,           # 2
-            text,            # 3
-            file_url,        # 4
-            status,          # 5
-            direction,       # 6
-            tg_id,           # 7
-            error,           # 8
-            datetime.now(),  # 9
-            datetime.now() if status in ['sent', 'received', 'delivered_to_1c'] else None # 10
+            source, phone, sender, messenger, text, status, direction, tg_id, error, datetime.now()
         ))
         await db.commit()
 
-# --- СЛУШАТЕЛЬ СОБЫТИЙ ---
+# --- СЛУШАТЕЛЬ ТЕЛЕГРАМ ---
 async def start_listener():
     tg = await get_client()
     managers_list = [m.strip() for m in MANAGERS if m.strip()]
+    print(f"DEBUG: ГЕНА СЛУШАЕТ. Менеджеры: {managers_list}")
 
     @tg.on(events.NewMessage(incoming=True))
     async def handler(event):
@@ -86,23 +93,39 @@ async def start_listener():
                 message_to_send = match.group(2).strip()
                 try:
                     sent = await tg.send_message(target_phone, message_to_send)
-                    # ВАЖНО: Ставим pending, чтобы 1С зафиксировала ответ менеджера
-                    await log_to_db("Manager", target_phone, message_to_send, status="pending", direction="out", tg_id=sent.id)
+                    await log_to_db(
+                        source="Manager", 
+                        phone=target_phone, 
+                        sender=sender_phone, 
+                        text=message_to_send, 
+                        status="pending", 
+                        direction="out", 
+                        tg_id=sent.id
+                    )
                     await event.reply(f"✅ Отправлено клиенту {target_phone}")
                 except Exception as e:
-                    await event.reply(f"❌ Ошибка отправки: {str(e)}")
+                    await event.reply(f"❌ Ошибка: {str(e)}")
             else:
-                await event.reply("⚠️ Ошибка формата! Используйте: `#номер/текст`")
+                await event.reply("⚠️ Формат: `#номер/текст`")
         
         # 2. Если пишет КЛИЕНТ
         else:
-            # ВАЖНО: Ставим pending, чтобы 1С могла забрать входящее
-            await log_to_db("Client", sender_phone or "Unknown", raw_text, status="pending", direction="in", tg_id=event.id)
+            await log_to_db(
+                source="Client", 
+                phone=sender_phone or "Unknown", 
+                sender=sender_phone, 
+                text=raw_text, 
+                status="pending", 
+                direction="in", 
+                tg_id=event.id
+            )
 
 @app.before_serving
 async def startup():
     await init_db()
     asyncio.create_task(start_listener())
+
+# --- ЭНДПОИНТЫ API ---
 
 @app.route('/send', methods=['POST'])
 async def send_telegram():
@@ -113,13 +136,11 @@ async def send_telegram():
     tg = await get_client()
     try:
         sent = await tg.send_message(phone, text)
-        # МЕНЯЕМ ТУТ: вместо status="sent" ставим status="pending"
-        # чтобы твоя новая процедура в 1С могла зафиксировать это событие
-        await log_to_db("1C", phone, text, status="pending", direction="out", tg_id=sent.id)
-        
+        # Теперь тоже ставим pending, чтобы 1С забрала подтверждение
+        await log_to_db("1C", phone, text, sender="system_1c", status="pending", direction="out", tg_id=sent.id)
         return jsonify({"status": "pending", "tg_id": sent.id}), 200
     except Exception as e:
-        await log_to_db("1C", phone, text, status="error", error=str(e))
+        await log_to_db("1C", phone, text, sender="system_1c", status="error", error=str(e))
         return jsonify({"error": str(e)}), 500
 
 @app.route('/fetch_new', methods=['GET', 'POST'])
@@ -130,36 +151,20 @@ async def fetch_new():
             rows = await cursor.fetchall()
             data = [dict(row) for row in rows]
         
-        if not data:
-            return jsonify([])
-
-        ids = [row['id'] for row in data]
-        placeholders = ', '.join(['?'] * len(ids))
-        await db.execute(f"UPDATE outbound_logs SET status = 'delivered_to_1c' WHERE id IN ({placeholders})", ids)
-        await db.commit()
+        if data:
+            ids = [row['id'] for row in data]
+            placeholders = ', '.join(['?'] * len(ids))
+            await db.execute(f"UPDATE outbound_logs SET status = 'delivered_to_1c' WHERE id IN ({placeholders})", ids)
+            await db.commit()
+        
         return jsonify(data)
 
 @app.route('/debug_db', methods=['GET'])
 async def debug_db():
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM outbound_logs ORDER BY id DESC LIMIT 100") as cursor:
+        async with db.execute("SELECT * FROM outbound_logs ORDER BY id DESC LIMIT 50") as cursor:
             return jsonify([dict(row) for row in await cursor.fetchall()])
-
-# --- АВТОРИЗАЦИЯ (без изменений) ---
-@app.route('/auth_phone', methods=['POST'])
-async def auth_phone():
-    data = await request.get_json()
-    tg = await get_client()
-    res = await tg.send_code_request(data.get('phone'))
-    return jsonify({"hash": res.phone_code_hash})
-
-@app.route('/auth_code', methods=['POST'])
-async def auth_code():
-    data = await request.get_json()
-    tg = await get_client()
-    await tg.sign_in(data.get('phone'), data.get('code'), phone_code_hash=data.get('hash'))
-    return jsonify({"status": "success"})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
