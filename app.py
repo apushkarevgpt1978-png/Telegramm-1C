@@ -117,16 +117,37 @@ async def start_listener():
         sender_phone = str(getattr(sender, 'phone', '')).lstrip('+').strip()
         raw_text = event.raw_text.strip()
         
-        # Логика МЕНЕДЖЕРА
+        # 1. Если пишет МЕНЕДЖЕР
         if sender_phone in managers_list:
             match = re.match(r'^#(\d+)/(.*)', raw_text, re.DOTALL)
             if match:
                 target_phone = match.group(1).strip()
                 message_to_send = match.group(2).strip()
                 try:
-                    sent = await tg.send_message(target_phone, message_to_send)
-                    await log_to_db(source="Manager", phone=target_phone, text=message_to_send, sender=sender_phone, direction="out", tg_id=sent.id)
-                    await event.reply(f"✅ Отправлено")
+                    # СКАЧИВАЕМ ФАЙЛ, ЕСЛИ ОН ЕСТЬ
+                    f_url = await save_tg_media(event)
+                    
+                    # ОТПРАВЛЯЕМ В ТЕЛЕГРАМ (и текст, и файл если есть)
+                    if f_url:
+                        # Если есть файл, отправляем его с подписью
+                        # Нам нужно передать локальный путь для отправки, а не URL
+                        local_path = os.path.join(FILES_DIR, f_url.split('/')[-1])
+                        sent = await tg.send_file(target_phone, local_path, caption=message_to_send)
+                    else:
+                        # Если только текст
+                        sent = await tg.send_message(target_phone, message_to_send)
+                    
+                    # ЗАПИСЫВАЕМ В БАЗУ С URL
+                    await log_to_db(
+                        source="Manager", 
+                        phone=target_phone, 
+                        text=message_to_send, 
+                        sender=sender_phone, 
+                        f_url=f_url, # ТЕПЕРЬ ТУТ БУДЕТ ССЫЛКА
+                        direction="out", 
+                        tg_id=sent.id
+                    )
+                    await event.reply(f"✅ Отправлено клиенту {target_phone}")
                 except Exception as e:
                     await event.reply(f"❌ Ошибка: {str(e)}")
         
