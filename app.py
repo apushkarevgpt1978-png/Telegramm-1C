@@ -16,7 +16,7 @@ API_ID = os.getenv('TG_API_ID')
 API_HASH = os.getenv('TG_API_HASH')
 SESSION_PATH = os.getenv('TG_SESSION_PATH', '/app/GenaAPI')
 TEMP_STORAGE = os.getenv('TG_TEMP_STORAGE', '/tmp/telegram_files')
-DB_PATH = os.getenv('TG_DB_PATH', 'gateway_messages.db')
+DB_PATH = os.getenv('DB_PATH', '/app/data/gateway_messages.db')
 
 os.makedirs(TEMP_STORAGE, exist_ok=True)
 
