@@ -43,10 +43,9 @@ async def init_db():
         """)
         await db.commit()
 
-async def log_to_db(source, phone, text, status='sent', direction='out', tg_id=None, error=None, file_url=None):
+async def log_to_db(source, phone, text, status='pending', direction='out', tg_id=None, error=None, file_url=None):
     async with aiosqlite.connect(DB_PATH) as db:
-        # 1. source, 2. phone, 3. message_text, 4. file_url, 5. status, 
-        # 6. direction, 7. tg_message_id, 8. error_text, 9. created_at, 10. sent_at
+        # Здесь статус по умолчанию изменен на 'pending' для надежности
         await db.execute("""
             INSERT INTO outbound_logs 
             (source, phone, message_text, file_url, status, direction, tg_message_id, error_text, created_at, sent_at) 
@@ -61,56 +60,44 @@ async def log_to_db(source, phone, text, status='sent', direction='out', tg_id=N
             tg_id,           # 7
             error,           # 8
             datetime.now(),  # 9
-            datetime.now() if status in ['sent', 'received'] else None # 10
+            datetime.now() if status in ['sent', 'received', 'delivered_to_1c'] else None # 10
         ))
         await db.commit()
 
 # --- СЛУШАТЕЛЬ СОБЫТИЙ ---
 async def start_listener():
     tg = await get_client()
-    
-    # Сразу очистим список менеджеров от пробелов
     managers_list = [m.strip() for m in MANAGERS if m.strip()]
-    print(f"DEBUG: Loaded managers: {managers_list}")
 
     @tg.on(events.NewMessage(incoming=True))
     async def handler(event):
-        # Добавляем проверку: только личные сообщения (не каналы и не группы)
         if not event.is_private:
             return 
 
         sender = await event.get_sender()
-        # Получаем номер и очищаем его от всего лишнего
         sender_phone = str(getattr(sender, 'phone', '')).lstrip('+').strip()
         raw_text = event.raw_text.strip()
         
-        print(f"DEBUG: New message from '{sender_phone}'. Is in managers? {sender_phone in managers_list}")
-
         # 1. Если пишет МЕНЕДЖЕР
         if sender_phone in managers_list:
             match = re.match(r'^#(\d+)/(.*)', raw_text, re.DOTALL)
-            
             if match:
                 target_phone = match.group(1).strip()
                 message_to_send = match.group(2).strip()
-                
                 try:
                     sent = await tg.send_message(target_phone, message_to_send)
-                    await log_to_db("Manager", target_phone, message_to_send, direction="out", tg_id=sent.id)
+                    # ВАЖНО: Ставим pending, чтобы 1С зафиксировала ответ менеджера
+                    await log_to_db("Manager", target_phone, message_to_send, status="pending", direction="out", tg_id=sent.id)
                     await event.reply(f"✅ Отправлено клиенту {target_phone}")
                 except Exception as e:
                     await event.reply(f"❌ Ошибка отправки: {str(e)}")
             else:
-                # Если менеджер написал БЕЗ маски - требуем маску
-                await event.reply(
-                    "⚠️ Ошибка формата!\n\n"
-                    "Используйте: `#номер/текст`\n"
-                    "Пример: `#79153019495/Добрый день!`"
-                )
+                await event.reply("⚠️ Ошибка формата! Используйте: `#номер/текст`")
         
         # 2. Если пишет КЛИЕНТ
         else:
-            await log_to_db("Client", sender_phone or "Unknown", raw_text, status="received", direction="in", tg_id=event.id)
+            # ВАЖНО: Ставим pending, чтобы 1С могла забрать входящее
+            await log_to_db("Client", sender_phone or "Unknown", raw_text, status="pending", direction="in", tg_id=event.id)
 
 @app.before_serving
 async def startup():
@@ -126,10 +113,29 @@ async def send_telegram():
     tg = await get_client()
     try:
         sent = await tg.send_message(phone, text)
+        # Сообщения из 1С можно сразу помечать как sent, так как 1С про них уже знает
         await log_to_db("1C", phone, text, status="sent", direction="out", tg_id=sent.id)
         return jsonify({"status": "sent", "tg_id": sent.id}), 200
     except Exception as e:
+        await log_to_db("1C", phone, text, status="error", error=str(e))
         return jsonify({"error": str(e)}), 500
+
+@app.route('/fetch_new', methods=['GET', 'POST'])
+async def fetch_new():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM outbound_logs WHERE status = 'pending'") as cursor:
+            rows = await cursor.fetchall()
+            data = [dict(row) for row in rows]
+        
+        if not data:
+            return jsonify([])
+
+        ids = [row['id'] for row in data]
+        placeholders = ', '.join(['?'] * len(ids))
+        await db.execute(f"UPDATE outbound_logs SET status = 'delivered_to_1c' WHERE id IN ({placeholders})", ids)
+        await db.commit()
+        return jsonify(data)
 
 @app.route('/debug_db', methods=['GET'])
 async def debug_db():
@@ -138,7 +144,7 @@ async def debug_db():
         async with db.execute("SELECT * FROM outbound_logs ORDER BY id DESC LIMIT 100") as cursor:
             return jsonify([dict(row) for row in await cursor.fetchall()])
 
-# --- АВТОРИЗАЦИЯ ---
+# --- АВТОРИЗАЦИЯ (без изменений) ---
 @app.route('/auth_phone', methods=['POST'])
 async def auth_phone():
     data = await request.get_json()
@@ -152,29 +158,6 @@ async def auth_code():
     tg = await get_client()
     await tg.sign_in(data.get('phone'), data.get('code'), phone_code_hash=data.get('hash'))
     return jsonify({"status": "success"})
-
-@app.route('/fetch_new', methods=['GET', 'POST'])
-async def fetch_new():
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        
-        # 1. Выбираем все записи со статусом pending
-        async with db.execute("SELECT * FROM outbound_logs WHERE status = 'pending'") as cursor:
-            rows = await cursor.fetchall()
-            data = [dict(row) for row in rows]
-        
-        if not data:
-            return jsonify([]) # Если новых нет, отдаем пустой массив
-
-        # 2. Собираем ID всех найденных записей
-        ids = [row['id'] for row in data]
-        
-        # 3. Меняем статус на 'delivered_to_1c' для этой пачки
-        placeholders = ', '.join(['?'] * len(ids))
-        await db.execute(f"UPDATE outbound_logs SET status = 'delivered_to_1c' WHERE id IN ({placeholders})", ids)
-        await db.commit()
-        
-        return jsonify(data)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
