@@ -151,19 +151,19 @@ async def start_listener():
                 except Exception as e:
                     await event.reply(f"❌ Ошибка: {str(e)}")
         
-        # Логика КЛИЕНТА
         else:
-            print(f"DEBUG: Входящее от {sender_phone}, файл: {bool(event.message.media)}")
+            print(f"DEBUG: Попытка скачать файл от {sender_phone}...")
             f_url = await save_tg_media(event)
+            print(f"DEBUG: Результат скачивания: {f_url}")
             
             await log_to_db(
                 source="Client", 
                 phone=sender_phone or "Unknown", 
                 text=raw_text or "[Файл]", 
                 sender=sender_phone, 
-                f_url=f_url, 
+                f_url=f_url,        # Передаем по имени
                 direction="in", 
-                tg_id=event.id
+                status="pending"    # Чтобы 1С сразу увидела
             )
 
 @app.before_serving
