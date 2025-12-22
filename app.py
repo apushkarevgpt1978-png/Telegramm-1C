@@ -113,9 +113,11 @@ async def send_telegram():
     tg = await get_client()
     try:
         sent = await tg.send_message(phone, text)
-        # Сообщения из 1С можно сразу помечать как sent, так как 1С про них уже знает
-        await log_to_db("1C", phone, text, status="sent", direction="out", tg_id=sent.id)
-        return jsonify({"status": "sent", "tg_id": sent.id}), 200
+        # МЕНЯЕМ ТУТ: вместо status="sent" ставим status="pending"
+        # чтобы твоя новая процедура в 1С могла зафиксировать это событие
+        await log_to_db("1C", phone, text, status="pending", direction="out", tg_id=sent.id)
+        
+        return jsonify({"status": "pending", "tg_id": sent.id}), 200
     except Exception as e:
         await log_to_db("1C", phone, text, status="error", error=str(e))
         return jsonify({"error": str(e)}), 500
