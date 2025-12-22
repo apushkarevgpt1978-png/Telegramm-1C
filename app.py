@@ -18,7 +18,8 @@ MANAGERS = os.environ.get('MANAGERS_PHONES', '').split(',')
 
 # Настройки хранилища файлов
 FILES_DIR = '/app/files'
-BASE_URL = 'http://192.168.121.99:5000/get_file' 
+# ВНИМАНИЕ: Замени твой_айпи на реальный IP сервера (например 192.168.1.100)
+BASE_URL = 'http://твой_айпи:5000/get_file'
 
 if not os.path.exists(FILES_DIR):
     os.makedirs(FILES_DIR)
@@ -44,38 +45,44 @@ async def init_db():
                 messenger TEXT DEFAULT 'tg',
                 message_text TEXT,
                 file_url TEXT,
-                status TEXT,
+                status TEXT DEFAULT 'pending',
                 tg_message_id INTEGER,
                 direction TEXT,
                 error_text TEXT,
-                created_at DATETIME,
-                sent_at DATETIME
+                created_at DATETIME
             )
         """)
         
+        # Миграции (добавление колонок если их нет)
         cursor = await db.execute("PRAGMA table_info(outbound_logs)")
         cols = [row[1] for row in await cursor.fetchall()]
         
-        if 'sender_number' not in cols:
-            await db.execute("ALTER TABLE outbound_logs ADD COLUMN sender_number TEXT")
-        if 'messenger' not in cols:
-            await db.execute("ALTER TABLE outbound_logs ADD COLUMN messenger TEXT DEFAULT 'tg'")
-        if 'direction' not in cols:
-            await db.execute("ALTER TABLE outbound_logs ADD COLUMN direction TEXT")
-        if 'file_url' not in cols:
-            await db.execute("ALTER TABLE outbound_logs ADD COLUMN file_url TEXT")
+        migrations = {
+            'sender_number': "ALTER TABLE outbound_logs ADD COLUMN sender_number TEXT",
+            'messenger': "ALTER TABLE outbound_logs ADD COLUMN messenger TEXT DEFAULT 'tg'",
+            'direction': "ALTER TABLE outbound_logs ADD COLUMN direction TEXT",
+            'file_url': "ALTER TABLE outbound_logs ADD COLUMN file_url TEXT",
+            'status': "ALTER TABLE outbound_logs ADD COLUMN status TEXT DEFAULT 'pending'"
+        }
+        
+        for col, sql in migrations.items():
+            if col not in cols:
+                try:
+                    await db.execute(sql)
+                except:
+                    pass
             
         await db.commit()
 
-# --- ЛОГИРОВАНИЕ ---
-async def log_to_db(source, phone, text, sender=None, file_url=None, messenger='tg', status='pending', direction='out', tg_id=None, error=None):
+# --- ФУНКЦИЯ ЛОГИРОВАНИЯ (11 аргументов) ---
+async def log_to_db(source, phone, text, sender=None, f_url=None, messenger='tg', status='pending', direction='out', tg_id=None, error=None):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             INSERT INTO outbound_logs 
             (source, phone, sender_number, messenger, message_text, file_url, status, direction, tg_message_id, error_text, created_at) 
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            source, phone, sender, messenger, text, file_url, status, direction, tg_id, error, datetime.now()
+            source, phone, sender, messenger, text, f_url, status, direction, tg_id, error, datetime.now()
         ))
         await db.commit()
 
@@ -91,12 +98,9 @@ async def save_tg_media(event):
         filename = f"{uuid.uuid4()}{file_ext}"
         path = os.path.join(FILES_DIR, filename)
         
-        # Скачиваем файл
+        # Скачиваем файл и ждем завершения
         await event.message.download_media(file=path)
-        
-        # Генерируем полную ссылку
-        full_url = f"{BASE_URL}/{filename}"
-        return full_url # <--- Обязательно возвращаем значение!
+        return f"{BASE_URL}/{filename}"
     return None
 
 # --- СЛУШАТЕЛЬ ТЕЛЕГРАМ ---
@@ -113,6 +117,7 @@ async def start_listener():
         sender_phone = str(getattr(sender, 'phone', '')).lstrip('+').strip()
         raw_text = event.raw_text.strip()
         
+        # Логика МЕНЕДЖЕРА
         if sender_phone in managers_list:
             match = re.match(r'^#(\d+)/(.*)', raw_text, re.DOTALL)
             if match:
@@ -120,30 +125,22 @@ async def start_listener():
                 message_to_send = match.group(2).strip()
                 try:
                     sent = await tg.send_message(target_phone, message_to_send)
-                    await log_to_db(source="Manager", phone=target_phone, sender=sender_phone, text=message_to_send, direction="out", tg_id=sent.id)
-                    await event.reply(f"✅ Отправлено клиенту {target_phone}")
+                    await log_to_db(source="Manager", phone=target_phone, text=message_to_send, sender=sender_phone, direction="out", tg_id=sent.id)
+                    await event.reply(f"✅ Отправлено")
                 except Exception as e:
                     await event.reply(f"❌ Ошибка: {str(e)}")
+        
+        # Логика КЛИЕНТА
         else:
-            print(f"DEBUG: Получено сообщение от клиента {sender_phone}. Медиа: {bool(event.message.media)}")
+            print(f"DEBUG: Входящее от {sender_phone}, файл: {bool(event.message.media)}")
+            f_url = await save_tg_media(event)
             
-            # Важно: Сначала получаем URL файла
-            f_url = None
-            if event.message.media:
-                try:
-                    f_url = await save_tg_media(event)
-                    print(f"DEBUG: Файл сохранен, URL: {f_url}")
-                except Exception as file_err:
-                    print(f"DEBUG: Ошибка сохранения файла: {file_err}")
-
-            # Только потом пишем в базу
             await log_to_db(
                 source="Client", 
                 phone=sender_phone or "Unknown", 
+                text=raw_text or "[Файл]", 
                 sender=sender_phone, 
-                text=raw_text or "[Медиа-файл]", 
-                file_url=f_url, # Здесь теперь точно должен быть URL или None
-                status="pending",
+                f_url=f_url, 
                 direction="in", 
                 tg_id=event.id
             )
@@ -153,25 +150,11 @@ async def startup():
     await init_db()
     asyncio.create_task(start_listener())
 
-# --- ЭНДПОИНТЫ API ---
+# --- API ЭНДПОИНТЫ ---
 
 @app.route('/get_file/<filename>')
 async def get_file(filename):
     return await send_from_directory(FILES_DIR, filename)
-
-@app.route('/send', methods=['POST'])
-async def send_telegram():
-    data = await request.get_json()
-    phone = str(data.get("phone", "")).lstrip('+')
-    text = data.get("text", "")
-    tg = await get_client()
-    try:
-        sent = await tg.send_message(phone, text)
-        await log_to_db("1C", phone, text, sender="system_1c", direction="out", tg_id=sent.id)
-        return jsonify({"status": "pending", "tg_id": sent.id}), 200
-    except Exception as e:
-        await log_to_db("1C", phone, text, sender="system_1c", status="error", error=str(e))
-        return jsonify({"error": str(e)}), 500
 
 @app.route('/fetch_new', methods=['GET', 'POST'])
 async def fetch_new():
@@ -187,11 +170,25 @@ async def fetch_new():
             await db.commit()
         return jsonify(data)
 
+@app.route('/send', methods=['POST'])
+async def send_telegram():
+    data = await request.get_json()
+    phone = str(data.get("phone", "")).lstrip('+')
+    text = data.get("text", "")
+    tg = await get_client()
+    try:
+        sent = await tg.send_message(phone, text)
+        await log_to_db("1C", phone, text, sender="system_1c", direction="out", tg_id=sent.id)
+        return jsonify({"status": "pending", "tg_id": sent.id}), 200
+    except Exception as e:
+        await log_to_db("1C", phone, text, sender="system_1c", status="error", error=str(e))
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/debug_db', methods=['GET'])
 async def debug_db():
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM outbound_logs ORDER BY id DESC LIMIT 50") as cursor:
+        async with db.execute("SELECT * FROM outbound_logs ORDER BY id DESC LIMIT 20") as cursor:
             return jsonify([dict(row) for row in await cursor.fetchall()])
 
 if __name__ == '__main__':
