@@ -153,5 +153,28 @@ async def auth_code():
     await tg.sign_in(data.get('phone'), data.get('code'), phone_code_hash=data.get('hash'))
     return jsonify({"status": "success"})
 
+@app.route('/fetch_new', methods=['GET', 'POST'])
+async def fetch_new():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        
+        # 1. Выбираем все записи со статусом pending
+        async with db.execute("SELECT * FROM outbound_logs WHERE status = 'pending'") as cursor:
+            rows = await cursor.fetchall()
+            data = [dict(row) for row in rows]
+        
+        if not data:
+            return jsonify([]) # Если новых нет, отдаем пустой массив
+
+        # 2. Собираем ID всех найденных записей
+        ids = [row['id'] for row in data]
+        
+        # 3. Меняем статус на 'delivered_to_1c' для этой пачки
+        placeholders = ', '.join(['?'] * len(ids))
+        await db.execute(f"UPDATE outbound_logs SET status = 'delivered_to_1c' WHERE id IN ({placeholders})", ids)
+        await db.commit()
+        
+        return jsonify(data)
+
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
