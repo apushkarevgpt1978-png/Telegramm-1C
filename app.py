@@ -56,25 +56,27 @@ async def log_to_db(source, phone, text, status='sent', direction='out', tg_id=N
 async def start_listener():
     tg = await get_client()
     
+    # Сразу очистим список менеджеров от пробелов
+    managers_list = [m.strip() for m in MANAGERS if m.strip()]
+    print(f"DEBUG: Loaded managers: {managers_list}")
+
     @tg.on(events.NewMessage(incoming=True))
     async def handler(event):
         sender = await event.get_sender()
-        sender_phone = getattr(sender, 'phone', '').lstrip('+')
+        # Получаем номер и очищаем его от всего лишнего
+        sender_phone = str(getattr(sender, 'phone', '')).lstrip('+').strip()
         raw_text = event.raw_text.strip()
+        
+        print(f"DEBUG: New message from '{sender_phone}'. Is in managers? {sender_phone in managers_list}")
 
         # 1. Если пишет МЕНЕДЖЕР
-        if sender_phone in MANAGERS:
-            # Маска: #номер/текст
+        if sender_phone in managers_list:
             match = re.match(r'^#(\d+)/(.*)', raw_text, re.DOTALL)
             
             if match:
-                target_phone = match.group(1)
+                target_phone = match.group(1).strip()
                 message_to_send = match.group(2).strip()
                 
-                if not message_to_send:
-                    await event.reply("⚠️ Вы забыли ввести текст сообщения после `/`")
-                    return
-
                 try:
                     sent = await tg.send_message(target_phone, message_to_send)
                     await log_to_db("Manager", target_phone, message_to_send, direction="out", tg_id=sent.id)
@@ -82,14 +84,14 @@ async def start_listener():
                 except Exception as e:
                     await event.reply(f"❌ Ошибка отправки: {str(e)}")
             else:
-                # Менеджер ошибся в маске
+                # Если менеджер написал БЕЗ маски - требуем маску
                 await event.reply(
                     "⚠️ Ошибка формата!\n\n"
                     "Используйте: `#номер/текст`\n"
                     "Пример: `#79153019495/Добрый день!`"
                 )
         
-        # 2. Если пишет КЛИЕНТ (и его номера нет в списке менеджеров)
+        # 2. Если пишет КЛИЕНТ
         else:
             await log_to_db("Client", sender_phone or "Unknown", raw_text, status="received", direction="in", tg_id=event.id)
 
