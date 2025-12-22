@@ -43,13 +43,25 @@ async def init_db():
         """)
         await db.commit()
 
-async def log_to_db(source, phone, text, status='sent', direction='out', tg_id=None, error=None):
+async def log_to_db(source, phone, text, status='sent', direction='out', tg_id=None, error=None, file_url=None):
     async with aiosqlite.connect(DB_PATH) as db:
+        # Здесь ровно 10 колонок и 10 знаков вопроса
         await db.execute("""
             INSERT INTO outbound_logs 
-            (source, phone, message_text, status, direction, tg_message_id, error_text, created_at, sent_at) 
+            (source, phone, message_text, file_url, status, direction, tg_message_id, error_text, created_at, sent_at) 
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (source, phone, text, status, direction, tg_id, error, datetime.now(), datetime.now()))
+        """, (
+            source,          # 1
+            phone,           # 2
+            text,            # 3
+            file_url,        # 4
+            status,          # 5
+            direction,       # 6
+            tg_id,           # 7
+            error,           # 8
+            datetime.now(),  # 9
+            datetime.now() if status in ['sent', 'received'] else None # 10
+        ))
         await db.commit()
 
 # --- СЛУШАТЕЛЬ СОБЫТИЙ ---
