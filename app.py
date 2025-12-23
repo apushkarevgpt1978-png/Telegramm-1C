@@ -128,48 +128,47 @@ async def start_listener():
         
         raw_text = event.raw_text.strip()
         
-        # --- БЛОК ПРОВЕРКИ МЕНЕДЖЕРА ---
         if sender_phone in managers_list:
-    # Используем re.search вместо re.match, если нужно игнорировать пробелы в начале
-    match = re.search(r'#(\d+)/(.*)', raw_text, re.DOTALL)
+        # Используем re.search вместо re.match, если нужно игнорировать пробелы в начале
+            match = re.search(r'#(\d+)/(.*)', raw_text, re.DOTALL)
     
-    if match:
-        target_phone = match.group(1).strip()
-        message_to_send = match.group(2).strip()
+            if match:
+                target_phone = match.group(1).strip()
+                message_to_send = match.group(2).strip()
         
-        try:
-            f_url = await save_tg_media(event)
-            
-            if f_url:
-                local_path = os.path.join(FILES_DIR, f_url.split('/')[-1])
-                sent = await tg.send_file(target_phone, local_path, caption=message_to_send)
+                try:
+                    f_url = await save_tg_media(event)
+                    
+                    if f_url:
+                        local_path = os.path.join(FILES_DIR, f_url.split('/')[-1])
+                        sent = await tg.send_file(target_phone, local_path, caption=message_to_send)
+                    else:
+                        sent = await tg.send_message(target_phone, message_to_send)
+                    
+                    # Логирование (без изменений)
+                    await log_to_db(
+                        source="Manager", phone=target_phone, text=message_to_send, 
+                        sender=sender_phone, f_url=f_url, direction="out", tg_id=sent.id
+                    )
+                    await event.reply(f"✅ Отправлено клиенту {target_phone}")
+                    
+                except Exception as e:
+                    await event.reply(f"❌ Ошибка отправки: {str(e)}")
             else:
-                sent = await tg.send_message(target_phone, message_to_send)
-            
-            # Логирование (без изменений)
-            await log_to_db(
-                source="Manager", phone=target_phone, text=message_to_send, 
-                sender=sender_phone, f_url=f_url, direction="out", tg_id=sent.id
-            )
-            await event.reply(f"✅ Отправлено клиенту {target_phone}")
-            
-        except Exception as e:
-            await event.reply(f"❌ Ошибка отправки: {str(e)}")
-    else:
-        # --- ИСПРАВЛЕННЫЙ БЛОК ОШИБКИ ---
-        # Оборачиваем пример в обратные кавычки (backticks) для копирования
-        # Добавляем parse_mode='md' или 'html', чтобы Telegram понял форматирование
-        example_mask = f"`#79876543210/текст сообщения`"
-        
-        error_message = (
-            "⚠️ **Ошибка формата!**\n\n"
-            "Чтобы отправить сообщение клиенту, используйте маску:\n"
-            f"{example_mask}\n\n"
-            "*(Нажмите на маску выше, чтобы скопировать её, затем вставьте и замените номер и текст)*"
-        )
-        
-        # Важно: 
-        await event.reply(error_message, parse_mode='markdown')
+                # --- ИСПРАВЛЕННЫЙ БЛОК ОШИБКИ ---
+                # Оборачиваем пример в обратные кавычки (backticks) для копирования
+                # Добавляем parse_mode='md' или 'html', чтобы Telegram понял форматирование
+                example_mask = f"`#79876543210/текст сообщения`"
+                
+                error_message = (
+                    "⚠️ **Ошибка формата!**\n\n"
+                    "Чтобы отправить сообщение клиенту, используйте маску:\n"
+                    f"{example_mask}\n\n"
+                    "*(Нажмите на маску выше, чтобы скопировать её, затем вставьте и замените номер и текст)*"
+                )
+                
+                # Важно: убедитесь, что ваш метод reply поддерживает parse_mode
+                await event.reply(error_message, parse_mode='markdown')
         
         else:
             f_url = await save_tg_media(event)
