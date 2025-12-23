@@ -71,26 +71,84 @@ async def start_listener():
     async def handler(event):
         if not event.is_private: return
         sender = await event.get_sender()
-        s_phone = str(getattr(sender, 'phone', '')).lstrip('+').strip()
+        sender_phone = str(getattr(sender, 'phone', '')).lstrip('+').strip()
         raw_text = (event.raw_text or "").strip()
         
-        if s_phone in managers_list:
+        # --- БЛОК МЕНЕДЖЕРА ---
+        if sender_phone in managers_list:
+            # Ищем маску #номер/текст
             match = re.search(r'#(\d+)/(.*)', raw_text, re.DOTALL)
+    
             if match:
-                target, msg = match.group(1).strip(), match.group(2).strip()
+                target_phone = match.group(1).strip()
+                message_to_send = match.group(2).strip()
+        
                 try:
-                    f_url = await save_tg_media(event)
-                    if f_url: sent = await tg.send_file(target, f_url, caption=msg)
-                    else: sent = await tg.send_message(target, msg)
-                    await log_to_db("Manager", target, msg, sender=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
-                    await event.reply(f"✅ Отправлено клиенту {target}")
-                except Exception as e: await event.reply(f"❌ Ошибка: {str(e)}")
+                    # 1. Проверяем наличие медиа и скачиваем его локально
+                    path_to_file = None
+                    f_url = None
+                    
+                    if event.message.media:
+                        file_ext = ".jpg"
+                        if hasattr(event.message.media, 'document'):
+                            for attr in event.message.media.document.attributes:
+                                if hasattr(attr, 'file_name'): 
+                                    file_ext = os.path.splitext(attr.file_name)[1]
+                        
+                        filename = f"{uuid.uuid4()}{file_ext}"
+                        path_to_file = os.path.join(FILES_DIR, filename)
+                        
+                        # Скачиваем файл в контейнер
+                        await event.message.download_media(file=path_to_file)
+                        # Ссылку для БД оставляем
+                        f_url = f"{BASE_URL}/{filename}"
+
+                    # 2. ОТПРАВКА (шлем файл через ПУТЬ, а не через URL)
+                    if path_to_file and os.path.exists(path_to_file):
+                        sent = await tg.send_file(target_phone, path_to_file, caption=message_to_send)
+                    else:
+                        sent = await tg.send_message(target_phone, message_to_send)
+                    
+                    # 3. Логирование
+                    await log_to_db(
+                        source="Manager", 
+                        phone=target_phone, 
+                        text=message_to_send, 
+                        sender=sender_phone, 
+                        f_url=f_url, 
+                        direction="out", 
+                        tg_id=sent.id
+                    )
+                    await event.reply(f"✅ Отправлено клиенту {target_phone}")
+                    
+                except Exception as e:
+                    await event.reply(f"❌ Ошибка отправки: {str(e)}")
             else:
-                await event.reply("⚠️ Формат: `#79001234567/Текст`", parse_mode='markdown')
+                # Менеджер написал без маски или ошибся в ней
+                example_mask = f"`#79876543210/текст сообщения`"
+                error_message = (
+                    "⚠️ **Ошибка формата!**\n\n"
+                    "Чтобы отправить сообщение клиенту, используйте маску:\n"
+                    f"{example_mask}\n\n"
+                    "*(Нажмите на маску выше, чтобы скопировать её)*"
+                )
+                await event.reply(error_message, parse_mode='markdown')
+        
+        # --- БЛОК КЛИЕНТА ---
         else:
-            name = f"{getattr(sender, 'first_name','')} {getattr(sender, 'last_name','')}".strip()
+            # Для клиента оставляем сохранение через URL, так как это нужно для 1С
             f_url = await save_tg_media(event)
-            await log_to_db("Client", s_phone, raw_text or "[Файл]", sender=s_phone, f_url=f_url, client_name=name, direction="in")
+            await log_to_db(
+                source="Client", 
+                phone=sender_phone or "Unknown", 
+                client_name=full_name,
+                tg_client_id=tg_client_id,
+                text=raw_text or "[Файл]", 
+                sender=sender_phone, 
+                f_url=f_url,
+                direction="in", 
+                status="pending"
+            )
 
 @app.before_serving
 async def startup():
