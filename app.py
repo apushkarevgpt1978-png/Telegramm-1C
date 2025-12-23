@@ -72,17 +72,45 @@ async def startup():
     asyncio.create_task(start_listener())
 
 @app.route('/send_file', methods=['POST'])
-async def send_file():
+async def send_file_from_1c():
+    # Мы берем данные из JSON, так как 1С шлет заголовок application/json
     data = await request.get_json()
-    phone, f_url = str(data.get("phone", "")).lstrip('+'), data.get("file")
-    c_id, c_name, text = data.get("client_id"), data.get("client_name"), data.get("text", "")
+    
+    if not data:
+        return jsonify({"error": "Empty JSON"}), 400
+
+    # Вытаскиваем данные из полей, которые шлет 1С
+    phone = str(data.get("phone", "")).lstrip('+').strip()
+    file_url = data.get("file")     # Ссылка на файл
+    caption = data.get("text", "")  # Текст сообщения (если есть)
+
+    # Проверка обязательных полей
+    if not phone or not file_url:
+        return jsonify({
+            "error": "phone and file are required",
+            "received_data": data  # Поможет увидеть, что реально пришло
+        }), 400
+
     tg = await get_client()
     try:
-        sent = await tg.send_file(phone, f_url, caption=text)
-        await log_to_db("1C", phone, text, sender="system_1c", f_url=f_url, c_id=c_id, c_name=c_name, tg_id=sent.id)
-        return jsonify({"status": "pending"}), 200
+        # Telegram сам скачает файл по ссылке и отправит его клиенту
+        sent = await tg.send_file(phone, file_url, caption=caption)
+        
+        # Записываем в базу (наша вчерашняя версия на 13 колонок)
+        await log_to_db(
+            source="1C", 
+            phone=phone, 
+            text=caption or "Файл", 
+            sender="system_1c", 
+            f_url=file_url, 
+            status="pending", 
+            direction="out", 
+            tg_id=sent.id
+        )
+        
+        return jsonify({"status": "pending", "tg_id": sent.id}), 200
     except Exception as e:
-        return jsonify({"error": str(e), "url": f_url}), 500
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/fetch_new', methods=['GET'])
 async def fetch_new():
