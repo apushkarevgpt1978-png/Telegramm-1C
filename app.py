@@ -24,31 +24,31 @@ async def get_client():
         await client.connect()
     return client
 
-# --- БД (Добавили client_id и client_name) ---
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS outbound_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                source TEXT, phone TEXT, sender_number TEXT,
-                client_id TEXT, client_name TEXT, messenger TEXT DEFAULT 'tg',
-                message_text TEXT, file_url TEXT, status TEXT DEFAULT 'pending',
-                tg_message_id INTEGER, direction TEXT, error_text TEXT, created_at DATETIME
+                source TEXT, phone TEXT, client_name TEXT, tg_client_id TEXT,
+                sender_number TEXT, messenger TEXT DEFAULT 'tg', message_text TEXT,
+                file_url TEXT, status TEXT DEFAULT 'pending', tg_message_id INTEGER,
+                direction TEXT, error_text TEXT, created_at DATETIME
             )
         """)
         await db.commit()
 
-# --- ЛОГИРОВАНИЕ (13 ПАРАМЕТРОВ) ---
+# --- ЛОГИРОВАНИЕ (СТРОГО 13 ПАРАМЕТРОВ) ---
 async def log_to_db(source, phone, text, sender=None, f_url=None, c_id=None, c_name=None, status='pending', direction='out', tg_id=None, error=None):
     async with aiosqlite.connect(DB_PATH) as db:
+        # Порядок в INSERT: 1.source, 2.phone, 3.client_name, 4.tg_client_id, 5.sender_number, 
+        # 6.messenger, 7.message_text, 8.file_url, 9.status, 10.direction, 11.tg_message_id, 12.error_text, 13.created_at
         await db.execute("""
             INSERT INTO outbound_logs 
-            (source, phone, sender_number, client_id, client_name, messenger, message_text, file_url, status, direction, tg_message_id, error_text, created_at) 
-            VALUES (?, ?, ?, ?, ?, ?, 'tg', ?, ?, ?, ?, ?, ?, ?)
-        """, (source, phone, sender, c_id, c_name, text, f_url, status, direction, tg_id, error, datetime.now()))
+            (source, phone, client_name, tg_client_id, sender_number, messenger, message_text, file_url, status, direction, tg_message_id, error_text, created_at) 
+            VALUES (?, ?, ?, ?, ?, 'tg', ?, ?, ?, ?, ?, ?, ?)
+        """, (source, phone, c_name, c_id, sender, text, f_url, status, direction, tg_id, error, datetime.now()))
         await db.commit()
 
-# --- СОХРАНЕНИЕ МЕДИА ДЛЯ КЛИЕНТОВ ---
 async def save_tg_media(event):
     if event.message.media:
         file_ext = ".jpg"
@@ -70,17 +70,23 @@ async def start_listener():
         if not event.is_private: return
         sender = await event.get_sender()
         s_phone = str(getattr(sender, 'phone', '')).lstrip('+').strip()
+        raw_text = (event.raw_text or "").strip()
         
         if s_phone in managers_list:
-            match = re.search(r'#(\d+)/(.*)', event.raw_text, re.DOTALL)
+            match = re.search(r'#(\d+)/(.*)', raw_text, re.DOTALL)
             if match:
                 target, msg = match.group(1).strip(), match.group(2).strip()
-                sent = await tg.send_message(target, msg) # Только текст, как вчера
-                await log_to_db("Manager", target, msg, sender=s_phone, direction="out", tg_id=sent.id)
+                try:
+                    sent = await tg.send_message(target, msg)
+                    await log_to_db("Manager", target, msg, sender=s_phone, direction="out", tg_id=sent.id)
+                    await event.reply(f"✅ Отправлено")
+                except Exception as e: await event.reply(f"❌ Ошибка: {str(e)}")
         else:
-            name = f"{getattr(sender, 'first_name','')} {getattr(sender, 'last_name','')}".strip()
+            # КЛИЕНТ: сохраняем его имя и ID из Telegram
+            name = f"{getattr(sender, 'first_name','')} {getattr(sender, 'last_name','')}".strip() or "User"
+            t_id = str(getattr(sender, 'id', ''))
             f_url = await save_tg_media(event)
-            await log_to_db("Client", s_phone, event.raw_text or "[Файл]", sender=s_phone, f_url=f_url, c_name=name, direction="in")
+            await log_to_db("Client", s_phone, raw_text or "[Файл]", f_url=f_url, c_id=t_id, c_name=name, direction="in")
 
 @app.before_serving
 async def startup():
@@ -90,37 +96,16 @@ async def startup():
 # --- API ЭНДПОИНТЫ ---
 
 @app.route('/send', methods=['POST'])
-async def send_text_from_1c():
+async def send_text():
     data = await request.get_json()
-    if not data: return jsonify({"error": "Empty JSON"}), 400
-
-    phone = str(data.get("phone", "")).lstrip('+').strip()
-    text = data.get("text", "")
-    c_id = data.get("client_id")
-    c_name = data.get("client_name")
-
-    if not phone or not text:
-        return jsonify({"error": "phone and text are required"}), 400
-
+    phone, text = str(data.get("phone", "")).lstrip('+').strip(), data.get("text", "")
+    c_id, c_name = data.get("client_id"), data.get("client_name")
     tg = await get_client()
     try:
         sent = await tg.send_message(phone, text)
-        
-        # Логируем (те же 13 параметров, что и в send_file)
-        await log_to_db(
-            source="1C", 
-            phone=phone, 
-            text=text, 
-            sender="system_1c", 
-            c_id=c_id, 
-            c_name=c_name, 
-            status="pending", 
-            direction="out", 
-            tg_id=sent.id
-        )
-        return jsonify({"status": "pending", "tg_id": sent.id}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        await log_to_db("1C", phone, text, sender="system_1c", c_id=c_id, c_name=c_name, tg_id=sent.id)
+        return jsonify({"status": "pending"}), 200
+    except Exception as e: return jsonify({"error": str(e)}), 500
 
 @app.route('/send_file', methods=['POST'])
 async def send_file():
