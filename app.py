@@ -72,14 +72,18 @@ async def start_listener():
         
         # ЛОГИКА МЕНЕДЖЕРА
         if s_phone in managers_list:
-            match = re.search(r'#(\d+)/(.*)', raw_text, re.DOTALL)
+            # Берем текст сообщения, если его нет (только картинка) — ставим пустую строку
+            msg_content = (event.raw_text or "").strip()
+            
+            match = re.search(r'#(\d+)/(.*)', msg_content, re.DOTALL)
+            
             if match:
-                target, msg = match.group(1).strip(), match.group(2).strip()
+                target = match.group(1).strip()
+                msg = match.group(2).strip()
                 try:
-                    # Если менеджер шлет файл с маской в подписи
                     f_url = await save_tg_media(event)
                     if f_url:
-                        # ВАЖНО: шлем через локальный путь, чтобы избежать "Webpage media empty"
+                        # Шлем локальный файл, чтобы не было ошибки "Webpage media empty"
                         local_path = os.path.join(FILES_DIR, f_url.split('/')[-1])
                         sent = await tg.send_file(target, local_path, caption=msg)
                     else:
@@ -87,17 +91,19 @@ async def start_listener():
                     
                     await log_to_db("Manager", target, msg, sender=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
                     await event.reply(f"✅ Доставлено")
-                except Exception as e: await event.reply(f"❌ Ошибка: {str(e)}")
+                except Exception as e: 
+                    await event.reply(f"❌ Ошибка отправки: {str(e)}")
             else:
-                # ВОТ ЭТОТ БЛОК, КОТОРЫЙ ТЫ ИСКАЛ:
-                example_mask = f"`#79876543210/текст сообщения`"
+                # ВОТ ТУТ ТЕПЕРЬ СРАБОТАЕТ ВСЕГДА:
+                example_mask = "`#79876543210/текст сообщения`"
                 error_message = (
                     "⚠️ **Ошибка формата!**\n\n"
                     "Чтобы отправить сообщение клиенту, используйте маску:\n"
                     f"{example_mask}\n\n"
                     "*(Нажмите на маску выше, чтобы скопировать её)*"
                 )
-                await event.reply(error_message, parse_mode='markdown')
+                # Используем простой 'md' и проверяем отправку
+                await event.reply(error_message, parse_mode='md')
         
         # ЛОГИКА КЛИЕНТА
         else:
