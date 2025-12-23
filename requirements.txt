@@ -1,3 +1,4 @@
 Quart==0.20.0
 Telethon==1.42.0
 aiosqlite
+httpx
