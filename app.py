@@ -40,8 +40,6 @@ async def init_db():
 # --- ЛОГИРОВАНИЕ (СТРОГО 13 ПАРАМЕТРОВ) ---
 async def log_to_db(source, phone, text, sender=None, f_url=None, c_id=None, c_name=None, status='pending', direction='out', tg_id=None, error=None):
     async with aiosqlite.connect(DB_PATH) as db:
-        # Порядок в INSERT: 1.source, 2.phone, 3.client_name, 4.tg_client_id, 5.sender_number, 
-        # 6.messenger, 7.message_text, 8.file_url, 9.status, 10.direction, 11.tg_message_id, 12.error_text, 13.created_at
         await db.execute("""
             INSERT INTO outbound_logs 
             (source, phone, client_name, tg_client_id, sender_number, messenger, message_text, file_url, status, direction, tg_message_id, error_text, created_at) 
@@ -61,7 +59,7 @@ async def save_tg_media(event):
         return f"{BASE_URL}/{filename}"
     return None
 
-# --- СЛУШАТЕЛЬ ---
+# --- СЛУШАТЕЛЬ ТЕЛЕГРАМ ---
 async def start_listener():
     tg = await get_client()
     managers_list = [m.strip() for m in MANAGERS if m.strip()]
@@ -72,17 +70,37 @@ async def start_listener():
         s_phone = str(getattr(sender, 'phone', '')).lstrip('+').strip()
         raw_text = (event.raw_text or "").strip()
         
+        # ЛОГИКА МЕНЕДЖЕРА
         if s_phone in managers_list:
             match = re.search(r'#(\d+)/(.*)', raw_text, re.DOTALL)
             if match:
                 target, msg = match.group(1).strip(), match.group(2).strip()
                 try:
-                    sent = await tg.send_message(target, msg)
-                    await log_to_db("Manager", target, msg, sender=s_phone, direction="out", tg_id=sent.id)
-                    await event.reply(f"✅ Отправлено")
+                    # Если менеджер шлет файл с маской в подписи
+                    f_url = await save_tg_media(event)
+                    if f_url:
+                        # ВАЖНО: шлем через локальный путь, чтобы избежать "Webpage media empty"
+                        local_path = os.path.join(FILES_DIR, f_url.split('/')[-1])
+                        sent = await tg.send_file(target, local_path, caption=msg)
+                    else:
+                        sent = await tg.send_message(target, msg)
+                    
+                    await log_to_db("Manager", target, msg, sender=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
+                    await event.reply(f"✅ Доставлено")
                 except Exception as e: await event.reply(f"❌ Ошибка: {str(e)}")
+            else:
+                # ВОТ ЭТОТ БЛОК, КОТОРЫЙ ТЫ ИСКАЛ:
+                example_mask = f"`#79876543210/текст сообщения`"
+                error_message = (
+                    "⚠️ **Ошибка формата!**\n\n"
+                    "Чтобы отправить сообщение клиенту, используйте маску:\n"
+                    f"{example_mask}\n\n"
+                    "*(Нажмите на маску выше, чтобы скопировать её)*"
+                )
+                await event.reply(error_message, parse_mode='markdown')
+        
+        # ЛОГИКА КЛИЕНТА
         else:
-            # КЛИЕНТ: сохраняем его имя и ID из Telegram
             name = f"{getattr(sender, 'first_name','')} {getattr(sender, 'last_name','')}".strip() or "User"
             t_id = str(getattr(sender, 'id', ''))
             f_url = await save_tg_media(event)
