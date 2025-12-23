@@ -128,8 +128,11 @@ async def start_listener():
         
         raw_text = event.raw_text.strip()
         
+        # --- БЛОК ПРОВЕРКИ МЕНЕДЖЕРА ---
         if sender_phone in managers_list:
+            # ВОТ ЭТА ПРОВЕРКА НА МАСКУ:
             match = re.match(r'^#(\d+)/(.*)', raw_text, re.DOTALL)
+            
             if match:
                 target_phone = match.group(1).strip()
                 message_to_send = match.group(2).strip()
@@ -142,8 +145,6 @@ async def start_listener():
                     else:
                         sent = await tg.send_message(target_phone, message_to_send)
                     
-                    # При отправке менеджером мы не всегда знаем имя получателя сразу, 
-                    # но сохраняем ID если Telegram его вернул
                     await log_to_db(
                         source="Manager", 
                         phone=target_phone, 
@@ -156,7 +157,17 @@ async def start_listener():
                     )
                     await event.reply(f"✅ Отправлено клиенту {target_phone}")
                 except Exception as e:
-                    await event.reply(f"❌ Ошибка: {str(e)}")
+                    await event.reply(f"❌ Ошибка отправки: {str(e)}")
+            else:
+                # --- НОВЫЙ БЛОК: Ошибка формата для менеджера ---
+                # Используем ` ` или ``` ``` для создания копируемого текста
+                error_message = (
+                    "⚠️ **Ошибка формата!**\n\n"
+                    "Используйте: `#номер/текст`\n"
+                    "Пример: `#79153019495/Добрый день!`\n\n"
+                    "*(Нажмите на пример выше, чтобы скопировать маску)*"
+                )
+                await event.reply(error_message)
         
         else:
             f_url = await save_tg_media(event)
