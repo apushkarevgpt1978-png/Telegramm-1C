@@ -34,9 +34,9 @@ async def get_client():
 # --- ИНИЦИАЛИЗАЦИЯ БД (С УДАЛЕНИЕМ СТАРОЙ) ---
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DROP TABLE IF EXISTS outbound_logs")
+        # 1. Создаем таблицу, если её совсем нет (с полным набором колонок)
         await db.execute("""
-            CREATE TABLE outbound_logs (
+            CREATE TABLE IF NOT EXISTS outbound_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 source TEXT,
                 phone TEXT,
@@ -53,8 +53,21 @@ async def init_db():
                 created_at DATETIME
             )
         """)
+        
+        # 2. УМНАЯ МИГРАЦИЯ: Если таблица уже была, но в ней нет новых колонок
+        cursor = await db.execute("PRAGMA table_info(outbound_logs)")
+        existing_cols = [row[1] for row in await cursor.fetchall()]
+        
+        if 'client_id' not in existing_cols:
+            await db.execute("ALTER TABLE outbound_logs ADD COLUMN client_id TEXT")
+            print("DEBUG: Добавлена колонка client_id")
+            
+        if 'client_name' not in existing_cols:
+            await db.execute("ALTER TABLE outbound_logs ADD COLUMN client_name TEXT")
+            print("DEBUG: Добавлена колонка client_name")
+            
         await db.commit()
-        print("DEBUG: База данных пересоздана (client_id, client_name добавлены)")
+        print("DEBUG: Инициализация БД завершена. Данные сохранены.")
 
 # --- УНИВЕРСАЛЬНАЯ ФУНКЦИЯ ЛОГИРОВАНИЯ (13 ЗНАЧЕНИЙ) ---
 async def log_to_db(source, phone, text, sender=None, f_url=None, c_id=None, c_name=None, status='pending', direction='out', tg_id=None, error=None):
