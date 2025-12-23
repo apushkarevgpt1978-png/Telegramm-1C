@@ -72,30 +72,34 @@ async def init_db():
 # --- УНИВЕРСАЛЬНАЯ ФУНКЦИЯ ЛОГИРОВАНИЯ (13 КОЛОНОК) ---
 async def log_to_db(source, phone, text, sender=None, f_url=None, c_id=None, c_name=None, status='pending', direction='out', tg_id=None, error=None):
     async with aiosqlite.connect(DB_PATH) as db:
-        # Список колонок (13 штук):
+        # Считаем колонки:
         # 1.source, 2.phone, 3.sender_number, 4.client_id, 5.client_name, 
         # 6.messenger, 7.message_text, 8.file_url, 9.status, 10.direction, 
         # 11.tg_message_id, 12.error_text, 13.created_at
         
-        await db.execute("""
+        sql = """
             INSERT INTO outbound_logs 
             (source, phone, sender_number, client_id, client_name, messenger, message_text, file_url, status, direction, tg_message_id, error_text, created_at) 
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (
-            source,      # 1
-            phone,       # 2
-            sender,      # 3
-            c_id,        # 4
-            c_name,      # 5
-            'tg',        # 6 (messenger)
-            text,        # 7
-            f_url,       # 8
-            status,      # 9
-            direction,   # 10
-            tg_id,       # 11
-            error,       # 12
-            datetime.now() # 13
-        ))
+        """
+        
+        values = (
+            source,          # 1
+            phone,           # 2
+            sender,          # 3
+            c_id,            # 4
+            c_name,          # 5
+            'tg',            # 6 (messenger)
+            text,            # 7
+            f_url,           # 8
+            status,          # 9
+            direction,       # 10
+            tg_id,           # 11
+            error,           # 12
+            datetime.now()   # 13
+        )
+        
+        await db.execute(sql, values)
         await db.commit()
 
 # --- СОХРАНЕНИЕ МЕДИА ---
