@@ -196,19 +196,37 @@ async def send_text():
 @app.route('/send_file', methods=['POST'])
 async def send_file():
     data = await request.get_json()
-    phone = str(data.get("phone", "")).lstrip('+')
+    phone = str(data.get("phone", "")).lstrip('+').strip()
     file_url = data.get("file")
     text = data.get("text", "")
     c_id = data.get("client_id")
     c_name = data.get("client_name")
     
+    if not phone or not file_url:
+        return jsonify({"error": "phone and file url are required"}), 400
+
     tg = await get_client()
     try:
+        # Пытаемся отправить только ссылку, как ты и просил
+        # Если Telegram выдаст "Webpage media empty", значит он не смог скачать файл по URL
         sent = await tg.send_file(phone, file_url, caption=text)
-        await log_to_db("1C", phone, text, sender="system_1c", f_url=file_url, c_id=c_id, c_name=c_name, direction="out", tg_id=sent.id)
+        
+        await log_to_db(
+            source="1C", 
+            phone=phone, 
+            text=text, 
+            sender="system_1c", 
+            f_url=file_url, 
+            c_id=c_id, 
+            c_name=c_name, 
+            direction="out", 
+            tg_id=sent.id
+        )
         return jsonify({"status": "pending", "tg_id": sent.id}), 200
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        # Если здесь выпадет "Webpage media empty", значит проблема в доступе к files.masterovit.ru
+        print(f"DEBUG Error sending URL: {file_url} - Error: {e}")
+        return jsonify({"error": str(e), "url_attempted": file_url}), 500
 
 @app.route('/fetch_new', methods=['GET', 'POST'])
 async def fetch_new():
