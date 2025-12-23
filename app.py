@@ -88,6 +88,40 @@ async def startup():
     asyncio.create_task(start_listener())
 
 # --- API ЭНДПОИНТЫ ---
+
+@app.route('/send', methods=['POST'])
+async def send_text_from_1c():
+    data = await request.get_json()
+    if not data: return jsonify({"error": "Empty JSON"}), 400
+
+    phone = str(data.get("phone", "")).lstrip('+').strip()
+    text = data.get("text", "")
+    c_id = data.get("client_id")
+    c_name = data.get("client_name")
+
+    if not phone or not text:
+        return jsonify({"error": "phone and text are required"}), 400
+
+    tg = await get_client()
+    try:
+        sent = await tg.send_message(phone, text)
+        
+        # Логируем (те же 13 параметров, что и в send_file)
+        await log_to_db(
+            source="1C", 
+            phone=phone, 
+            text=text, 
+            sender="system_1c", 
+            c_id=c_id, 
+            c_name=c_name, 
+            status="pending", 
+            direction="out", 
+            tg_id=sent.id
+        )
+        return jsonify({"status": "pending", "tg_id": sent.id}), 200
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 @app.route('/send_file', methods=['POST'])
 async def send_file():
     data = await request.get_json()
