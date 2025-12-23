@@ -5,7 +5,7 @@ from telethon import TelegramClient, events
 
 app = Quart(__name__)
 
-# --- НАСТРОЙКИ (Берутся из переменных окружения Хаба) ---
+# --- НАСТРОЙКИ (Переменные окружения) ---
 API_ID = int(os.environ.get('API_ID', 0))
 API_HASH = os.environ.get('API_HASH', '')
 SESSION_PATH = os.environ.get('TG_SESSION_PATH', '/app/data/GenaAPI')
@@ -21,18 +21,17 @@ async def get_client():
     global client
     if client is None:
         client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
-        # В Хабе используем start() для возможности первой авторизации через логи
         await client.start()
         print("--- ГЕНА УСПЕШНО ЗАПУЩЕН И АВТОРИЗОВАН ---")
     return client
 
 async def init_db():
-    print(f"--- Инициализация БД по пути: {DB_PATH} ---")
+    print(f"--- Инициализация БД: {DB_PATH} ---")
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS outbound_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                source TEXT, phone TEXT, client_name TEXT, client_id TEXT, -- Убрали tg_
+                source TEXT, phone TEXT, client_name TEXT, client_id TEXT,
                 sender_number TEXT, messenger TEXT DEFAULT 'tg', message_text TEXT,
                 file_url TEXT, status TEXT DEFAULT 'pending', tg_message_id INTEGER,
                 direction TEXT, error_text TEXT, created_at DATETIME
@@ -51,11 +50,9 @@ async def log_to_db(source, phone, text, sender=None, f_url=None, c_id=None, c_n
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (source, phone, c_name, c_id, sender, messenger, text, f_url, status, direction, tg_id, error, created_at))
             await db.commit()
-            
-            # Этот принт в логах Хаба покажет, что реально ушло в базу
-            print(f"✅ УСПЕШНО: {c_name} (ID: {c_id}) записан в колонку client_id")
+            print(f"✅ ЗАПИСЬ В БД: {c_name} (ID: {c_id}) | Статус: {status} | Dir: {direction}")
     except Exception as e:
-        print(f"⚠️ ОШИБКА ЗАПИСИ: {e}")
+        print(f"⚠️ ОШИБКА ЗАПИСИ В БД: {e}")
 
 async def save_tg_media(event):
     if event.message.media:
@@ -80,21 +77,17 @@ async def start_listener():
         sender = await event.get_sender()
         s_phone = str(getattr(sender, 'phone', '')).lstrip('+').strip()
         
-        # ЛОГИКА МЕНЕДЖЕРА
+        # ЛОГИКА МЕНЕДЖЕРА (#номер/текст)
         if s_phone in managers_list:
             msg_content = (event.raw_text or "").strip()
             match = re.search(r'#(\d+)/(.*)', msg_content, re.DOTALL)
             
             if match:
-                target = match.group(1).strip()
-                msg = match.group(2).strip()
-                
-                # ТЕСТИРОВАНО В VSC: Пытаемся найти реальное Имя и ID в ТГ
+                target, msg = match.group(1).strip(), match.group(2).strip()
                 real_name, real_id = "Client", target
                 try:
                     entity = await tg.get_entity(target)
-                    fn = getattr(entity, 'first_name', '') or ""
-                    ln = getattr(entity, 'last_name', '') or ""
+                    fn, ln = getattr(entity, 'first_name', '') or "", getattr(entity, 'last_name', '') or ""
                     real_name = f"{fn} {ln}".strip() or "Client"
                     real_id = str(getattr(entity, 'id', target))
                 except: pass
@@ -108,16 +101,15 @@ async def start_listener():
                         sent = await tg.send_message(target, msg)
                     
                     await log_to_db("Manager", target, msg, sender=s_phone, f_url=f_url, c_id=real_id, c_name=real_name, direction="out", tg_id=sent.id)
-                    await event.reply(f"✅ Доставлено {real_name}")
+                    await event.reply(f"✅ Отправлено: {real_name}")
                 except Exception as e: 
-                    await event.reply(f"❌ Ошибка отправки: {str(e)}")
+                    await event.reply(f"❌ Ошибка: {str(e)}")
             else:
-                await event.reply("⚠️ Используйте маску: `#79001112233/текст`", parse_mode='md')
+                await event.reply("⚠️ Формат: `#79001112233/текст`", parse_mode='md')
         
         # ЛОГИКА КЛИЕНТА
         else:
-            fn = getattr(sender, 'first_name','') or ""
-            ln = getattr(sender, 'last_name','') or ""
+            fn, ln = getattr(sender, 'first_name','') or "", getattr(sender, 'last_name','') or ""
             name = f"{fn} {ln}".strip() or "User"
             t_id = str(getattr(sender, 'id', ''))
             f_url = await save_tg_media(event)
@@ -128,18 +120,30 @@ async def startup():
     await init_db()
     asyncio.create_task(start_listener())
 
-# --- API ЭНДПОИНТЫ ---
+# --- API ЭНДПОИНТЫ ДЛЯ 1С ---
 
 @app.route('/send', methods=['POST'])
 async def send_text():
     data = await request.get_json()
     phone = str(data.get("phone", "")).lstrip('+').strip()
-    text = data.get("text", "")
-    c_id, c_name = data.get("client_id"), data.get("client_name")
+    text, c_id, c_name = data.get("text", ""), data.get("client_id"), data.get("client_name")
     tg = await get_client()
     try:
         sent = await tg.send_message(phone, text)
         await log_to_db("1C", phone, text, sender="system_1c", c_id=c_id, c_name=c_name, direction="out", tg_id=sent.id)
+        return jsonify({"status": "ok"}), 200
+    except Exception as e: return jsonify({"error": str(e)}), 500
+
+@app.route('/send_file', methods=['POST'])
+async def send_file():
+    data = await request.get_json()
+    phone = str(data.get("phone", "")).lstrip('+').strip()
+    f_url, text = data.get("file"), data.get("text", "")
+    c_id, c_name = data.get("client_id"), data.get("client_name")
+    tg = await get_client()
+    try:
+        sent = await tg.send_file(phone, f_url, caption=text)
+        await log_to_db("1C", phone, text, sender="system_1c", f_url=f_url, c_id=c_id, c_name=c_name, direction="out", tg_id=sent.id)
         return jsonify({"status": "ok"}), 200
     except Exception as e: return jsonify({"error": str(e)}), 500
 
