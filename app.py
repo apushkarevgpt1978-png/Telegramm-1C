@@ -5,23 +5,29 @@ from telethon import TelegramClient, events
 
 app = Quart(__name__)
 
-# --- НАСТРОЙКИ ---
+# --- НАСТРОЙКИ (Андрей, проверь эти переменные в своем Portainer/Docker) ---
 API_ID = int(os.environ.get('API_ID', 0))
 API_HASH = os.environ.get('API_HASH', '')
 SESSION_PATH = os.environ.get('TG_SESSION_PATH', '/app/data/GenaAPI')
 DB_PATH = os.environ.get('DB_PATH', '/app/data/gateway_messages.db')
 MANAGERS = os.environ.get('MANAGERS_PHONES', '').split(',')
 FILES_DIR = '/app/files'
-BASE_URL = 'http://192.168.121.99:5000/get_file' # Проверь свой IP
+BASE_URL = 'http://192.168.121.99:5000/get_file' 
 
-if not os.path.exists(FILES_DIR): os.makedirs(FILES_DIR)
+if not os.path.exists(FILES_DIR): 
+    os.makedirs(FILES_DIR)
 
-async def get_client():
-    if not hasattr(app, 'tg_client'):
-        app.tg_client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
-        await app.tg_client.connect()
-    return app.tg_client
+# Глобальный клиент, чтобы не плодить подключения
+tg_client = None
 
+async def get_tg_client():
+    global tg_client
+    if tg_client is None:
+        tg_client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
+        await tg_client.connect()
+    return tg_client
+
+# --- БД (Безопасная инициализация) ---
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
@@ -39,6 +45,7 @@ async def init_db():
         if 'client_name' not in cols: await db.execute("ALTER TABLE outbound_logs ADD COLUMN client_name TEXT")
         await db.commit()
 
+# --- ЛОГИРОВАНИЕ (СТРОГО 13 ПАРАМЕТРОВ) ---
 async def log_to_db(source, phone, text, sender=None, f_url=None, c_id=None, c_name=None, status='pending', direction='out', tg_id=None, error=None):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
@@ -48,9 +55,10 @@ async def log_to_db(source, phone, text, sender=None, f_url=None, c_id=None, c_n
         """, (source, phone, sender, c_id, c_name, 'tg', text, f_url, status, direction, tg_id, error, datetime.now()))
         await db.commit()
 
+# --- СОХРАНЕНИЕ ФАЙЛОВ ---
 async def save_tg_media(event):
     if event.message.media:
-        file_ext = ".jpg" # По умолчанию
+        file_ext = ".jpg"
         if hasattr(event.message.media, 'document'):
             for attr in event.message.media.document.attributes:
                 if hasattr(attr, 'file_name'):
@@ -61,58 +69,59 @@ async def save_tg_media(event):
         return f"{BASE_URL}/{filename}"
     return None
 
-# --- СЛУШАТЕЛЬ ---
+# --- СЛУШАТЕЛЬ ТЕЛЕГРАМ ---
 async def start_listener():
-    tg = await get_client()
+    tg = await get_tg_client()
     managers_list = [m.strip() for m in MANAGERS if m.strip()]
 
     @tg.on(events.NewMessage(incoming=True))
     async def handler(event):
         if not event.is_private: return
         sender = await event.get_sender()
-        phone = str(getattr(sender, 'phone', '')).lstrip('+').strip()
-        raw_text = event.raw_text.strip()
+        s_phone = str(getattr(sender, 'phone', '')).lstrip('+').strip()
+        raw_text = (event.raw_text or "").strip()
 
-        # --- ЛОГИКА МЕНЕДЖЕРА ---
-        if phone in managers_list:
+        # 1. МЕНЕДЖЕР
+        if s_phone in managers_list:
             match = re.match(r'^#(\d+)/(.*)', raw_text, re.DOTALL)
             if match:
-                target_phone = match.group(1).strip()
-                msg_text = match.group(2).strip()
+                target = match.group(1).strip()
+                msg = match.group(2).strip()
                 try:
                     f_url = await save_tg_media(event)
                     if f_url:
-                        sent = await tg.send_file(target_phone, f_url, caption=msg_text)
+                        sent = await tg.send_file(target, f_url, caption=msg)
                     else:
-                        sent = await tg.send_message(target_phone, msg_text)
-                    
-                    await log_to_db("Manager", target_phone, msg_text, sender=phone, f_url=f_url, direction="out", tg_id=sent.id)
-                    await event.reply("✅ Отправлено клиенту")
+                        sent = await tg.send_message(target, msg)
+                    await log_to_db("Manager", target, msg, sender=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
+                    await event.reply("✅ Доставлено")
                 except Exception as e:
-                    await event.reply(f"❌ Ошибка отправки: {str(e)}")
+                    await event.reply(f"❌ Ошибка: {str(e)}")
             else:
-                # Если менеджер написал без маски
-                await event.reply("⚠️ Чтобы отправить сообщение клиенту, используйте формат:\n`#79001234567/Текст сообщения`")
+                await event.reply("⚠️ Используйте формат: #номер/текст")
 
-        # --- ЛОГИКА КЛИЕНТА ---
+        # 2. КЛИЕНТ
         else:
-            name = f"{getattr(sender, 'first_name','')} {getattr(sender, 'last_name','')}".strip() or "User"
+            c_name = f"{getattr(sender, 'first_name','')} {getattr(sender, 'last_name','')}".strip() or "User"
             f_url = await save_tg_media(event)
-            await log_to_db("Client", phone, raw_text or "[Файл]", sender=phone, f_url=f_url, c_name=name, direction="in")
+            await log_to_db("Client", s_phone, raw_text or "[Файл]", sender=s_phone, f_url=f_url, c_name=c_name, direction="in")
 
 @app.before_serving
 async def startup():
     await init_db()
     asyncio.create_task(start_listener())
 
+# --- API ЭНДПОИНТЫ ---
+
 @app.route('/get_file/<filename>')
 async def get_file(filename):
     return await send_from_directory(FILES_DIR, filename)
 
 @app.route('/send_file', methods=['POST'])
-async def send_file_from_1c():
+async def api_send_file():
     data = await request.get_json()
-    if not data: return jsonify({"error": "Empty JSON"}), 400
+    if not data: return jsonify({"error": "No JSON"}), 400
+    
     phone = str(data.get("phone", "")).lstrip('+').strip()
     file_url = data.get("file")
     caption = data.get("text", "")
@@ -122,7 +131,7 @@ async def send_file_from_1c():
     if not phone or not file_url:
         return jsonify({"error": "phone and file are required"}), 400
 
-    tg = await get_client()
+    tg = await get_tg_client()
     try:
         sent = await tg.send_file(phone, file_url, caption=caption)
         await log_to_db("1C", phone, caption, sender="system_1c", f_url=file_url, c_id=c_id, c_name=c_name, tg_id=sent.id)
@@ -138,9 +147,16 @@ async def fetch_new():
             rows = [dict(r) for r in await c.fetchall()]
         if rows:
             ids = [r['id'] for r in rows]
-            await db.execute(f"UPDATE outbound_logs SET status='delivered_to_1c' WHERE id IN ({','.join(['?']*len(ids))})", ids)
+            await db.execute(f"UPDATE outbound_logs SET status='ok' WHERE id IN ({','.join(['?']*len(ids))})", ids)
             await db.commit()
         return jsonify(rows)
+
+@app.route('/debug_db', methods=['GET'])
+async def debug_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM outbound_logs ORDER BY id DESC LIMIT 20") as c:
+            return jsonify([dict(r) for r in await c.fetchall()])
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
