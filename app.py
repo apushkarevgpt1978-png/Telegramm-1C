@@ -188,7 +188,7 @@ async def startup():
 async def get_file(filename):
     return await send_from_directory(FILES_DIR, filename)
 
-@app.route('/fetch_new', methods=['GET'])
+@app.route('/fetch_new', methods=['GET', 'POST'])
 async def fetch_new():
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
