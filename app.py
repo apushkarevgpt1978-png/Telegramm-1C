@@ -76,7 +76,7 @@ async def init_db():
             
         await db.commit()
 
-# --- ОБНОВЛЕННАЯ ФУНКЦИЯ ЛОГИРОВАНИЯ ---
+# --- ФУНКЦИЯ ЛОГИРОВАНИЯ (13 колонок) ---
 async def log_to_db(source, phone, text, sender=None, f_url=None, messenger='tg', 
                     status='pending', direction='out', tg_id=None, error=None, 
                     client_name=None, tg_client_id=None):
@@ -111,7 +111,6 @@ async def save_tg_media(event):
 async def start_listener():
     tg = await get_client()
     managers_list = [m.strip() for m in MANAGERS if m.strip()]
-    print(f"DEBUG: ГЕНА СЛУШАЕТ. Менеджеры: {managers_list}")
 
     @tg.on(events.NewMessage(incoming=True))
     async def handler(event):
@@ -120,16 +119,15 @@ async def start_listener():
         sender = await event.get_sender()
         sender_phone = str(getattr(sender, 'phone', '')).lstrip('+').strip()
         
-        # Получаем имя (Имя + Фамилия или Username)
         first_name = getattr(sender, 'first_name', '') or ''
         last_name = getattr(sender, 'last_name', '') or ''
         full_name = f"{first_name} {last_name}".strip() or getattr(sender, 'username', 'Unknown')
         tg_client_id = getattr(sender, 'id', None)
         
-        raw_text = event.raw_text.strip()
+        raw_text = (event.raw_text or "").strip()
         
+        # --- БЛОК МЕНЕДЖЕРА ---
         if sender_phone in managers_list:
-        # Используем re.search вместо re.match, если нужно игнорировать пробелы в начале
             match = re.search(r'#(\d+)/(.*)', raw_text, re.DOTALL)
     
             if match:
@@ -138,14 +136,13 @@ async def start_listener():
         
                 try:
                     f_url = await save_tg_media(event)
-                    
                     if f_url:
-                        local_path = os.path.join(FILES_DIR, f_url.split('/')[-1])
-                        sent = await tg.send_file(target_phone, local_path, caption=message_to_send)
+                        # Отправляем файл с подписью
+                        sent = await tg.send_file(target_phone, f_url, caption=message_to_send)
                     else:
+                        # Отправляем просто текст
                         sent = await tg.send_message(target_phone, message_to_send)
                     
-                    # Логирование (без изменений)
                     await log_to_db(
                         source="Manager", phone=target_phone, text=message_to_send, 
                         sender=sender_phone, f_url=f_url, direction="out", tg_id=sent.id
@@ -155,21 +152,17 @@ async def start_listener():
                 except Exception as e:
                     await event.reply(f"❌ Ошибка отправки: {str(e)}")
             else:
-                # --- ИСПРАВЛЕННЫЙ БЛОК ОШИБКИ ---
-                # Оборачиваем пример в обратные кавычки (backticks) для копирования
-                # Добавляем parse_mode='md' или 'html', чтобы Telegram понял форматирование
+                # Ошибка формата маски
                 example_mask = f"`#79876543210/текст сообщения`"
-                
                 error_message = (
                     "⚠️ **Ошибка формата!**\n\n"
                     "Чтобы отправить сообщение клиенту, используйте маску:\n"
                     f"{example_mask}\n\n"
-                    "*(Нажмите на маску выше, чтобы скопировать её, затем вставьте и замените номер и текст)*"
+                    "*(Нажмите на маску выше, чтобы скопировать её)*"
                 )
-                
-                # Важно: убедитесь, что ваш метод reply поддерживает parse_mode
                 await event.reply(error_message, parse_mode='markdown')
         
+        # --- БЛОК КЛИЕНТА ---
         else:
             f_url = await save_tg_media(event)
             await log_to_db(
@@ -195,7 +188,7 @@ async def startup():
 async def get_file(filename):
     return await send_from_directory(FILES_DIR, filename)
 
-@app.route('/fetch_new', methods=['GET', 'POST'])
+@app.route('/fetch_new', methods=['GET'])
 async def fetch_new():
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -221,15 +214,11 @@ async def send_telegram():
                         tg_id=sent.id, tg_client_id=sent.peer_id.user_id if hasattr(sent.peer_id, 'user_id') else None)
         return jsonify({"status": "pending", "tg_id": sent.id}), 200
     except Exception as e:
-        await log_to_db("1C", phone, text, sender="system_1c", status="error", error=str(e))
         return jsonify({"error": str(e)}), 500
 
 @app.route('/send_file', methods=['POST'])
 async def send_file_from_1c():
     data = await request.get_json()
-    if not data:
-        return jsonify({"error": "Empty JSON"}), 400
-
     phone = str(data.get("phone", "")).lstrip('+').strip()
     file_url = data.get("file")
     caption = data.get("text", "")
@@ -240,17 +229,8 @@ async def send_file_from_1c():
     tg = await get_client()
     try:
         sent = await tg.send_file(phone, file_url, caption=caption)
-        await log_to_db(
-            source="1C", 
-            phone=phone, 
-            text=caption or "Файл", 
-            sender="system_1c", 
-            f_url=file_url, 
-            status="pending",
-            direction="out", 
-            tg_id=sent.id,
-            tg_client_id=sent.peer_id.user_id if hasattr(sent.peer_id, 'user_id') else None
-        )
+        await log_to_db("1C", phone, caption or "Файл", sender="system_1c", f_url=file_url, 
+                        status="pending", direction="out", tg_id=sent.id)
         return jsonify({"status": "pending", "tg_id": sent.id}), 200
     except Exception as e:
         return jsonify({"error": str(e)}), 500
