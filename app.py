@@ -32,7 +32,7 @@ async def init_db():
         await db.execute("""
             CREATE TABLE IF NOT EXISTS outbound_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                source TEXT, phone TEXT, client_name TEXT, tg_client_id TEXT,
+                source TEXT, phone TEXT, client_name TEXT, client_id TEXT, -- Убрали tg_
                 sender_number TEXT, messenger TEXT DEFAULT 'tg', message_text TEXT,
                 file_url TEXT, status TEXT DEFAULT 'pending', tg_message_id INTEGER,
                 direction TEXT, error_text TEXT, created_at DATETIME
@@ -40,26 +40,22 @@ async def init_db():
         """)
         await db.commit()
 
-# --- УЛУЧШЕННОЕ ЛОГИРОВАНИЕ С ПРИНТАМИ ---
 async def log_to_db(source, phone, text, sender=None, f_url=None, c_id=None, c_name=None, status='pending', direction='out', tg_id=None, error=None):
     messenger = 'tg'
     created_at = datetime.now()
     try:
         async with aiosqlite.connect(DB_PATH, timeout=10) as db:
-            cursor = await db.execute("""
+            await db.execute("""
                 INSERT INTO outbound_logs 
-                (source, phone, client_name, tg_client_id, sender_number, messenger, message_text, file_url, status, direction, tg_message_id, error_text, created_at) 
+                (source, phone, client_name, client_id, sender_number, messenger, message_text, file_url, status, direction, tg_message_id, error_text, created_at) 
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (source, phone, c_name, c_id, sender, messenger, text, f_url, status, direction, tg_id, error, created_at))
-            new_id = cursor.lastrowid
             await db.commit()
             
-            print(f"\n📦 [БАЗА ЗАПИСЬ] ID: {new_id} | {direction.upper()}")
-            print(f"   Клиент: {c_name} (ID: {c_id}) | Тел: {phone}")
-            print(f"   Источник: {source} | Мессенджер: {messenger}")
-            print(f"   Текст: {text[:50]}..." if text else "   [Без текста]")
+            # Этот принт в логах Хаба покажет, что реально ушло в базу
+            print(f"✅ УСПЕШНО: {c_name} (ID: {c_id}) записан в колонку client_id")
     except Exception as e:
-        print(f"⚠️ ОШИБКА ЗАПИСИ В БД: {e}")
+        print(f"⚠️ ОШИБКА ЗАПИСИ: {e}")
 
 async def save_tg_media(event):
     if event.message.media:
