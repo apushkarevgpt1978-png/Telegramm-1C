@@ -24,33 +24,31 @@ async def get_client():
         await client.connect()
     return client
 
+# --- БД (Добавили client_id и client_name) ---
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS outbound_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                source TEXT, phone TEXT, client_name TEXT, tg_client_id INTEGER,
-                sender_number TEXT, messenger TEXT DEFAULT 'tg', message_text TEXT,
-                file_url TEXT, status TEXT DEFAULT 'pending', tg_message_id INTEGER,
-                direction TEXT, error_text TEXT, created_at DATETIME
+                source TEXT, phone TEXT, sender_number TEXT,
+                client_id TEXT, client_name TEXT, messenger TEXT DEFAULT 'tg',
+                message_text TEXT, file_url TEXT, status TEXT DEFAULT 'pending',
+                tg_message_id INTEGER, direction TEXT, error_text TEXT, created_at DATETIME
             )
         """)
         await db.commit()
 
-# --- ЛОГИРОВАНИЕ (СТРОГО 13 ПАРАМЕТРОВ) ---
-async def log_to_db(source, phone, text, sender=None, f_url=None, messenger='tg', 
-                    status='pending', direction='out', tg_id=None, error=None, 
-                    client_name=None, tg_client_id=None):
+# --- ЛОГИРОВАНИЕ (13 ПАРАМЕТРОВ) ---
+async def log_to_db(source, phone, text, sender=None, f_url=None, c_id=None, c_name=None, status='pending', direction='out', tg_id=None, error=None):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             INSERT INTO outbound_logs 
-            (source, phone, client_name, tg_client_id, sender_number, messenger, 
-             message_text, file_url, status, direction, tg_message_id, error_text, created_at) 
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """, (source, phone, client_name, tg_client_id, sender, messenger, 
-              text, f_url, status, direction, tg_id, error, datetime.now()))
+            (source, phone, sender_number, client_id, client_name, messenger, message_text, file_url, status, direction, tg_message_id, error_text, created_at) 
+            VALUES (?, ?, ?, ?, ?, ?, 'tg', ?, ?, ?, ?, ?, ?, ?)
+        """, (source, phone, sender, c_id, c_name, text, f_url, status, direction, tg_id, error, datetime.now()))
         await db.commit()
 
+# --- СОХРАНЕНИЕ МЕДИА ДЛЯ КЛИЕНТОВ ---
 async def save_tg_media(event):
     if event.message.media:
         file_ext = ".jpg"
@@ -71,114 +69,48 @@ async def start_listener():
     async def handler(event):
         if not event.is_private: return
         sender = await event.get_sender()
-        sender_phone = str(getattr(sender, 'phone', '')).lstrip('+').strip()
-        raw_text = (event.raw_text or "").strip()
+        s_phone = str(getattr(sender, 'phone', '')).lstrip('+').strip()
         
-        # --- БЛОК МЕНЕДЖЕРА ---
-        if sender_phone in managers_list:
-            # Ищем маску #номер/текст
-            match = re.search(r'#(\d+)/(.*)', raw_text, re.DOTALL)
-    
+        if s_phone in managers_list:
+            match = re.search(r'#(\d+)/(.*)', event.raw_text, re.DOTALL)
             if match:
-                target_phone = match.group(1).strip()
-                message_to_send = match.group(2).strip()
-        
-                try:
-                    # 1. Проверяем наличие медиа и скачиваем его локально
-                    path_to_file = None
-                    f_url = None
-                    
-                    if event.message.media:
-                        file_ext = ".jpg"
-                        if hasattr(event.message.media, 'document'):
-                            for attr in event.message.media.document.attributes:
-                                if hasattr(attr, 'file_name'): 
-                                    file_ext = os.path.splitext(attr.file_name)[1]
-                        
-                        filename = f"{uuid.uuid4()}{file_ext}"
-                        path_to_file = os.path.join(FILES_DIR, filename)
-                        
-                        # Скачиваем файл в контейнер
-                        await event.message.download_media(file=path_to_file)
-                        # Ссылку для БД оставляем
-                        f_url = f"{BASE_URL}/{filename}"
-
-                    # 2. ОТПРАВКА (шлем файл через ПУТЬ, а не через URL)
-                    if path_to_file and os.path.exists(path_to_file):
-                        sent = await tg.send_file(target_phone, path_to_file, caption=message_to_send)
-                    else:
-                        sent = await tg.send_message(target_phone, message_to_send)
-                    
-                    # 3. Логирование
-                    await log_to_db(
-                        source="Manager", 
-                        phone=target_phone, 
-                        text=message_to_send, 
-                        sender=sender_phone, 
-                        f_url=f_url, 
-                        direction="out", 
-                        tg_id=sent.id
-                    )
-                    await event.reply(f"✅ Отправлено клиенту {target_phone}")
-                    
-                except Exception as e:
-                    await event.reply(f"❌ Ошибка отправки: {str(e)}")
-            else:
-                # Менеджер написал без маски или ошибся в ней
-                example_mask = f"`#79876543210/текст сообщения`"
-                error_message = (
-                    "⚠️ **Ошибка формата!**\n\n"
-                    "Чтобы отправить сообщение клиенту, используйте маску:\n"
-                    f"{example_mask}\n\n"
-                    "*(Нажмите на маску выше, чтобы скопировать её)*"
-                )
-                await event.reply(error_message, parse_mode='markdown')
-        
-        # --- БЛОК КЛИЕНТА ---
+                target, msg = match.group(1).strip(), match.group(2).strip()
+                sent = await tg.send_message(target, msg) # Только текст, как вчера
+                await log_to_db("Manager", target, msg, sender=s_phone, direction="out", tg_id=sent.id)
         else:
-            # Для клиента оставляем сохранение через URL, так как это нужно для 1С
+            name = f"{getattr(sender, 'first_name','')} {getattr(sender, 'last_name','')}".strip()
             f_url = await save_tg_media(event)
-            await log_to_db(
-                source="Client", 
-                phone=sender_phone or "Unknown", 
-                client_name=full_name,
-                tg_client_id=tg_client_id,
-                text=raw_text or "[Файл]", 
-                sender=sender_phone, 
-                f_url=f_url,
-                direction="in", 
-                status="pending"
-            )
+            await log_to_db("Client", s_phone, event.raw_text or "[Файл]", sender=s_phone, f_url=f_url, c_name=name, direction="in")
 
 @app.before_serving
 async def startup():
     await init_db()
     asyncio.create_task(start_listener())
 
-# --- ЭНДПОИНТЫ ---
-@app.route('/fetch_new', methods=['GET', 'POST']) # РЕШЕНИЕ ТВОЕЙ ОШИБКИ 405
-async def fetch_new():
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM outbound_logs WHERE status = 'pending'") as cursor:
-            rows = [dict(r) for r in await cursor.fetchall()]
-        if rows:
-            ids = [r['id'] for r in rows]
-            await db.execute(f"UPDATE outbound_logs SET status='delivered_to_1c' WHERE id IN ({','.join(['?']*len(ids))})", ids)
-            await db.commit()
-        return jsonify(rows)
-
+# --- API ЭНДПОИНТЫ ---
 @app.route('/send_file', methods=['POST'])
 async def send_file():
     data = await request.get_json()
     phone, f_url = str(data.get("phone", "")).lstrip('+').strip(), data.get("file")
-    if not phone or not f_url: return jsonify({"error": "phone and file required"}), 400
+    c_id, c_name = data.get("client_id"), data.get("client_name")
     tg = await get_client()
     try:
         sent = await tg.send_file(phone, f_url, caption=data.get("text", ""))
-        await log_to_db("1C", phone, data.get("text", ""), sender="system_1c", f_url=f_url, tg_id=sent.id)
-        return jsonify({"status": "pending", "tg_id": sent.id}), 200
+        await log_to_db("1C", phone, data.get("text", ""), sender="system_1c", f_url=f_url, c_id=c_id, c_name=c_name, tg_id=sent.id)
+        return jsonify({"status": "pending"}), 200
     except Exception as e: return jsonify({"error": str(e)}), 500
+
+@app.route('/fetch_new', methods=['GET', 'POST'])
+async def fetch_new():
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM outbound_logs WHERE status = 'pending'") as c:
+            rows = [dict(r) for r in await c.fetchall()]
+        if rows:
+            ids = [r['id'] for r in rows]
+            await db.execute(f"UPDATE outbound_logs SET status='ok' WHERE id IN ({','.join(['?']*len(ids))})", ids)
+            await db.commit()
+        return jsonify(rows)
 
 @app.route('/get_file/<filename>')
 async def get_file(filename): return await send_from_directory(FILES_DIR, filename)
