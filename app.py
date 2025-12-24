@@ -27,7 +27,6 @@ async def get_client():
     return client
 
 async def init_db():
-    print(f"--- Инициализация БД: {DB_PATH} ---")
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute("""
             CREATE TABLE IF NOT EXISTS outbound_logs (
@@ -35,7 +34,7 @@ async def init_db():
                 source TEXT, phone TEXT, client_name TEXT, client_id TEXT,
                 sender_number TEXT, messenger TEXT DEFAULT 'tg', message_text TEXT,
                 file_url TEXT, status TEXT DEFAULT 'pending', tg_message_id INTEGER,
-                direction TEXT, error_text TEXT, created_at DATETIME
+                direction TEXT, error_text TEXT, created_at DATETIME, manager TEXT
             )
         """)
         try:
@@ -43,7 +42,7 @@ async def init_db():
         except: pass 
         await db.commit()
 
-async def log_to_db(source, phone, text, manager=None, f_url=None, c_id=None, c_name=None, direction='in', tg_id=None, status='pending'):
+async def log_to_db(source, phone, text, c_name=None, c_id=None, manager=None, s_number=None, f_url=None, direction='in', tg_id=None):
     messenger = 'tg'
     created_at = datetime.now()
     try:
@@ -52,11 +51,11 @@ async def log_to_db(source, phone, text, manager=None, f_url=None, c_id=None, c_
                 INSERT INTO outbound_logs 
                 (source, phone, client_name, client_id, manager, sender_number, messenger, message_text, file_url, status, direction, tg_message_id, created_at) 
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (source, phone, c_name, c_id, manager, manager, messenger, text, f_url, status, direction, tg_id, created_at))
+            """, (source, phone, c_name, c_id, manager, s_number, messenger, text, f_url, 'pending', direction, tg_id, created_at))
             await db.commit()
-            print(f"✅ ЗАПИСЬ В БД: {c_name or phone} | Менеджер: {manager} | ID: {c_id}")
+            print(f"✅ БД ЗАПИСЬ: {direction} | Клиент: {c_name} | Менеджер: {manager} | Sender: {s_number}")
     except Exception as e:
-        print(f"⚠️ ОШИБКА ЗАПИСИ В БД: {e}")
+        print(f"⚠️ ОШИБКА БД: {e}")
 
 async def save_tg_media(event):
     if event.message.media:
@@ -86,6 +85,7 @@ async def start_listener():
         s_id = str(event.sender_id)
         raw_text = (event.raw_text or "").strip()
 
+        # ОТПРАВКА МЕНЕДЖЕРОМ ИЗ TG
         if s_phone in managers_list:
             match = re.search(r'#(\d+)/(.*)', raw_text, re.DOTALL)
             if match:
@@ -94,12 +94,14 @@ async def start_listener():
                 try:
                     f_url = await save_tg_media(event)
                     sent = await (tg.send_file(target_phone, os.path.join(FILES_DIR, f_url.split('/')[-1]), caption=message_text) if f_url else tg.send_message(target_phone, message_text))
-                    await log_to_db(source="Manager", phone=target_phone, text=message_text, manager=s_phone, f_url=f_url, c_id=target_phone, c_name="Client", direction="out", tg_id=sent.id)
+                    # Тут s_number = s_phone (номер менеджера), manager = s_phone
+                    await log_to_db(source="Manager", phone=target_phone, text=message_text, c_name="Client", c_id=target_phone, manager=s_phone, s_number=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
                     await event.reply("✅ Отправлено")
                 except Exception as e: await event.reply(f"❌ Ошибка: {str(e)}")
+        # ВХОДЯЩЕЕ ОТ КЛИЕНТА
         else:
             f_url = await save_tg_media(event)
-            await log_to_db(source="Client", phone=s_phone or "Unknown", text=raw_text or "[Файл]", manager=None, f_url=f_url, c_id=s_id, c_name=s_full_name, direction="in", tg_id=event.message.id)
+            await log_to_db(source="Client", phone=s_phone or "Unknown", text=raw_text or "[Файл]", c_name=s_full_name, c_id=s_id, direction="in", tg_id=event.message.id)
 
 @app.before_serving
 async def startup():
@@ -115,13 +117,13 @@ async def send_text():
     text = data.get("text", "")
     c_id = data.get("client_id")
     c_name = data.get("client_name")
-    manager = data.get("manager", "1C System")
+    manager_name = data.get("manager")
     
     tg = await get_client()
     try:
         sent = await tg.send_message(phone, text)
-        # ИСПРАВЛЕНО: Теперь c_id и c_name передаются корректно
-        await log_to_db(source="1C", phone=phone, text=text, manager=manager, c_id=c_id, c_name=c_name, direction="out", tg_id=sent.id)
+        # s_number=None, так как отправка из 1С
+        await log_to_db(source="1C", phone=phone, text=text, c_name=c_name, c_id=c_id, manager=manager_name, s_number=None, direction="out", tg_id=sent.id)
         return jsonify({"status": "ok"}), 200
     except Exception as e: return jsonify({"error": str(e)}), 500
 
@@ -131,13 +133,12 @@ async def send_file():
     phone = str(data.get("phone", "")).lstrip('+').strip()
     f_url, text = data.get("file"), data.get("text", "")
     c_id, c_name = data.get("client_id"), data.get("client_name")
-    manager = data.get("manager", "1C System")
+    manager_name = data.get("manager")
     
     tg = await get_client()
     try:
         sent = await tg.send_file(phone, f_url, caption=text)
-        # ИСПРАВЛЕНО: Теперь c_id и c_name передаются корректно
-        await log_to_db(source="1C", phone=phone, text=text, manager=manager, f_url=f_url, c_id=c_id, c_name=c_name, direction="out", tg_id=sent.id)
+        await log_to_db(source="1C", phone=phone, text=text, c_name=c_name, c_id=c_id, manager=manager_name, s_number=None, f_url=f_url, direction="out", tg_id=sent.id)
         return jsonify({"status": "ok"}), 200
     except Exception as e: return jsonify({"error": str(e)}), 500
 
