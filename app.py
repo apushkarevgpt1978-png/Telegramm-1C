@@ -108,12 +108,23 @@ async def start_listener():
                 await event.reply("⚠️ Формат: `#79001112233/текст`", parse_mode='md')
         
         # ЛОГИКА КЛИЕНТА
+        # --- БЛОК КЛИЕНТА ---
         else:
-            fn, ln = getattr(sender, 'first_name','') or "", getattr(sender, 'last_name','') or ""
-            name = f"{fn} {ln}".strip() or "User"
-            t_id = str(getattr(sender, 'id', ''))
+            # Для клиента сохраняем файл (если он есть)
             f_url = await save_tg_media(event)
-            await log_to_db("Client", s_phone, event.raw_text or "[Файл]", f_url=f_url, c_id=t_id, c_name=name, direction="in")
+            
+            await log_to_db(
+                source="Client", 
+                phone=sender_phone or "Unknown", 
+                client_name=full_name,
+                tg_client_id=tg_client_id,
+                text=raw_text or "[Файл]", 
+                sender=sender_phone, 
+                f_url=f_url,
+                direction="in", 
+                status="pending",
+                tg_id=event.message.id  
+            )
 
 @app.before_serving
 async def startup():
