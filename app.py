@@ -12,7 +12,6 @@ SESSION_PATH = os.environ.get('TG_SESSION_PATH', '/app/data/GenaAPI')
 DB_PATH = os.environ.get('DB_PATH', '/app/data/gateway_messages.db')
 MANAGERS = os.environ.get('MANAGERS_PHONES', '').split(',')
 FILES_DIR = '/app/files'
-# Базовый URL для скачивания файлов из 1С
 BASE_URL = os.environ.get('BASE_URL', 'http://192.168.121.99:5000')
 
 if not os.path.exists(FILES_DIR): os.makedirs(FILES_DIR)
@@ -52,7 +51,7 @@ async def log_to_db(source, phone, text, sender=None, f_url=None, c_id=None, c_n
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (source, phone, c_name, c_id, sender, messenger, text, f_url, status, direction, tg_id, created_at))
             await db.commit()
-            print(f"✅ ЗАПИСЬ В БД: {c_name} | Статус: {status} | Dir: {direction}")
+            print(f"✅ ЗАПИСЬ В БД: {c_name} (ID: {c_id}) | Статус: {status} | Dir: {direction}")
     except Exception as e:
         print(f"⚠️ ОШИБКА ЗАПИСИ В БД: {e}")
 
@@ -77,7 +76,7 @@ async def start_listener():
     async def handler(event):
         if not event.is_private: return
         
-        # 1. Сразу собираем базовые данные отправителя
+        # 1. Получаем отправителя и текст один раз для всех блоков
         sender = await event.get_sender()
         s_phone = str(getattr(sender, 'phone', '') or '').lstrip('+').strip()
         s_first = getattr(sender, 'first_name', '') or ''
@@ -86,19 +85,16 @@ async def start_listener():
         s_id = str(event.sender_id)
         raw_text = (event.raw_text or "").strip()
 
-        # --- ЛОГИКА МЕНЕДЖЕРА (#номер/текст) ---
+        # --- ЛОГИКА МЕНЕДЖЕРА ---
         if s_phone in managers_list:
             match = re.search(r'#(\d+)/(.*)', raw_text, re.DOTALL)
             if match:
                 target_phone = match.group(1).strip()
                 message_text = match.group(2).strip()
-                
                 try:
                     f_url = await save_tg_media(event)
                     if f_url:
-                        # Отправка файла локально (чтобы не зависеть от внешних URL)
-                        local_filename = f_url.split('/')[-1]
-                        local_path = os.path.join(FILES_DIR, local_filename)
+                        local_path = os.path.join(FILES_DIR, f_url.split('/')[-1])
                         sent = await tg.send_file(target_phone, local_path, caption=message_text)
                     else:
                         sent = await tg.send_message(target_phone, message_text)
@@ -108,13 +104,13 @@ async def start_listener():
                         sender=s_phone, f_url=f_url, c_id=target_phone, c_name="Client", 
                         direction="out", tg_id=sent.id
                     )
-                    await event.reply(f"✅ Отправлено")
+                    await event.reply("✅ Отправлено")
                 except Exception as e: 
                     await event.reply(f"❌ Ошибка: {str(e)}")
             else:
                 await event.reply("⚠️ Формат: `#79001112233/текст`", parse_mode='md')
         
-        # --- БЛОК КЛИЕНТА ---
+        # --- ЛОГИКА КЛИЕНТА ---
         else:
             f_url = await save_tg_media(event)
             await log_to_db(
@@ -140,9 +136,7 @@ async def startup():
 async def send_text():
     data = await request.get_json()
     phone = str(data.get("phone", "")).lstrip('+').strip()
-    text = data.get("text", "")
-    c_id = data.get("client_id")
-    c_name = data.get("client_name")
+    text, c_id, c_name = data.get("text", ""), data.get("client_id"), data.get("client_name")
     tg = await get_client()
     try:
         sent = await tg.send_message(phone, text)
@@ -154,32 +148,4 @@ async def send_text():
 async def send_file():
     data = await request.get_json()
     phone = str(data.get("phone", "")).lstrip('+').strip()
-    f_url = data.get("file")
-    text = data.get("text", "")
-    c_id = data.get("client_id")
-    c_name = data.get("client_name")
-    tg = await get_client()
-    try:
-        sent = await tg.send_file(phone, f_url, caption=text)
-        await log_to_db("1C", phone, text, sender="system_1c", f_url=f_url, c_id=c_id, c_name=c_name, direction="out", tg_id=sent.id)
-        return jsonify({"status": "ok"}), 200
-    except Exception as e: return jsonify({"error": str(e)}), 500
-
-@app.route('/fetch_new', methods=['GET', 'POST'])
-async def fetch_new():
-    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
-        db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM outbound_logs WHERE status = 'pending'") as c:
-            rows = [dict(r) for r in await c.fetchall()]
-        if rows:
-            ids = [r['id'] for r in rows]
-            await db.execute(f"UPDATE outbound_logs SET status='ok' WHERE id IN ({','.join(['?']*len(ids))})", ids)
-            await db.commit()
-        return jsonify(rows)
-
-@app.route('/get_file/<filename>')
-async def get_file(filename): 
-    return await send_from_directory(FILES_DIR, filename)
-
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    f_url, text = data.
