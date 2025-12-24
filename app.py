@@ -36,12 +36,10 @@ async def init_db():
                 direction TEXT, error_text TEXT, created_at DATETIME, manager TEXT
             )
         """)
-        try:
-            await db.execute("ALTER TABLE outbound_logs ADD COLUMN manager TEXT")
+        try: await db.execute("ALTER TABLE outbound_logs ADD COLUMN manager TEXT")
         except: pass 
         await db.commit()
 
-# Универсальная функция записи в БД
 async def log_to_db(source, phone, text, c_name=None, c_id=None, manager=None, s_number=None, f_url=None, direction='in', tg_id=None):
     created_at = datetime.now()
     try:
@@ -52,8 +50,7 @@ async def log_to_db(source, phone, text, c_name=None, c_id=None, manager=None, s
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (source, phone, c_name, c_id, manager, s_number, text, f_url, 'pending', direction, tg_id, created_at))
             await db.commit()
-    except Exception as e:
-        print(f"⚠️ ОШИБКА БД: {e}")
+    except Exception as e: print(f"⚠️ ОШИБКА БД: {e}")
 
 async def save_tg_media(event):
     if event.message.media:
@@ -80,39 +77,30 @@ async def start_listener():
         s_id = str(event.sender_id)
         raw_text = (event.raw_text or "").strip()
 
-        # 1. ОТПРАВКА МЕНЕДЖЕРОМ ЧЕРЕЗ ШЛЮЗ (#номер/текст)
         if s_phone in managers_list:
             match = re.search(r'#(\d+)/(.*)', raw_text, re.DOTALL)
             if match:
                 target_phone, message_text = match.group(1).strip(), match.group(2).strip()
                 try:
-                    # Пытаемся получить данные клиента из Телеграм по номеру
-                    real_name, real_id = "Client", target_phone
+                    c_n, c_i = "Client", target_phone
                     try:
-                        entity = await tg.get_entity(target_phone)
-                        real_name = f"{getattr(entity, 'first_name', '') or ''} {getattr(entity, 'last_name', '') or ''}".strip() or "Client"
-                        real_id = str(entity.id)
+                        ent = await tg.get_entity(target_phone)
+                        c_n = f"{getattr(ent, 'first_name', '') or ''} {getattr(ent, 'last_name', '') or ''}".strip() or "Client"
+                        c_i = str(ent.id)
                     except: pass
-
                     f_url = await save_tg_media(event)
                     sent = await (tg.send_file(target_phone, os.path.join(FILES_DIR, f_url.split('/')[-1]), caption=message_text) if f_url else tg.send_message(target_phone, message_text))
-                    
-                    # ЗАПИСЬ: sender_number = номер менеджера, а client_id/name - данные клиента
-                    await log_to_db(source="Manager", phone=target_phone, text=message_text, c_name=real_name, c_id=real_id, manager=s_phone, s_number=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
+                    await log_to_db(source="Manager", phone=target_phone, text=message_text, c_name=c_n, c_id=c_i, manager=s_phone, s_number=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
                     await event.reply("✅ Отправлено")
                 except Exception as e: await event.reply(f"❌ Ошибка: {str(e)}")
-        
-        # 2. ВХОДЯЩЕЕ ОТ КЛИЕНТА
         else:
             f_url = await save_tg_media(event)
-            await log_to_db(source="Client", phone=s_phone or "Unknown", text=raw_text or "[Файл]", c_name=s_full_name, c_id=s_id, direction="in", tg_id=event.message.id)
+            await log_to_db(source="Client", phone=s_phone or "Unknown", text=raw_text or "[Файл]", c_name=s_full_name, c_id=s_id, f_url=f_url, direction="in", tg_id=event.message.id)
 
 @app.before_serving
 async def startup():
     await init_db()
     asyncio.create_task(start_listener())
-
-# --- API ДЛЯ 1С ---
 
 @app.route('/send', methods=['POST'])
 async def send_text():
@@ -121,17 +109,14 @@ async def send_text():
     text, mgr = data.get("text", ""), data.get("manager")
     tg = await get_client()
     try:
-        # Получаем данные клиента перед отправкой, чтобы заполнить базу
-        c_name, c_id = "Client", phone
+        c_n, c_i = "Client", phone
         try:
-            entity = await tg.get_entity(phone)
-            c_name = f"{getattr(entity, 'first_name', '') or ''} {getattr(entity, 'last_name', '') or ''}".strip() or "Client"
-            c_id = str(entity.id)
+            ent = await tg.get_entity(phone)
+            c_n = f"{getattr(ent, 'first_name', '') or ''} {getattr(ent, 'last_name', '') or ''}".strip() or "Client"
+            c_i = str(ent.id)
         except: pass
-
         sent = await tg.send_message(phone, text)
-        # ЗАПИСЬ: sender_number пустой (None), поля клиента заполнены из TG
-        await log_to_db(source="1C", phone=phone, text=text, c_name=c_name, c_id=c_id, manager=mgr, s_number=None, direction="out", tg_id=sent.id)
+        await log_to_db(source="1C", phone=phone, text=text, c_name=c_n, c_id=c_i, manager=mgr, s_number=None, direction="out", tg_id=sent.id)
         return jsonify({"status": "ok"}), 200
     except Exception as e: return jsonify({"error": str(e)}), 500
 
@@ -142,15 +127,14 @@ async def send_file():
     f_url, text, mgr = data.get("file"), data.get("text", ""), data.get("manager")
     tg = await get_client()
     try:
-        c_name, c_id = "Client", phone
+        c_n, c_i = "Client", phone
         try:
-            entity = await tg.get_entity(phone)
-            c_name = f"{getattr(entity, 'first_name', '') or ''} {getattr(entity, 'last_name', '') or ''}".strip() or "Client"
-            c_id = str(entity.id)
+            ent = await tg.get_entity(phone)
+            c_n = f"{getattr(ent, 'first_name', '') or ''} {getattr(ent, 'last_name', '') or ''}".strip() or "Client"
+            c_i = str(ent.id)
         except: pass
-
         sent = await tg.send_file(phone, f_url, caption=text)
-        await log_to_db(source="1C", phone=phone, text=text, c_name=c_name, c_id=c_id, manager=mgr, s_number=None, f_url=f_url, direction="out", tg_id=sent.id)
+        await log_to_db(source="1C", phone=phone, text=text, c_name=c_n, c_id=c_i, manager=mgr, s_number=None, f_url=f_url, direction="out", tg_id=sent.id)
         return jsonify({"status": "ok"}), 200
     except Exception as e: return jsonify({"error": str(e)}), 500
 
