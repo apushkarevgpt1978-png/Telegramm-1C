@@ -12,7 +12,7 @@ SESSION_PATH = os.environ.get('TG_SESSION_PATH', '/app/data/GenaAPI')
 DB_PATH = os.environ.get('DB_PATH', '/app/data/gateway_messages.db')
 MANAGERS = os.environ.get('MANAGERS_PHONES', '').split(',')
 FILES_DIR = '/app/files'
-BASE_URL = os.environ.get('BASE_URL', 'http://192.168.121.99:5000/get_file')
+BASE_URL = os.environ.get('BASE_URL', 'http://192.168.121.99:5001/get_file')
 
 if not os.path.exists(FILES_DIR): os.makedirs(FILES_DIR)
 
