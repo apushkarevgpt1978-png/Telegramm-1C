@@ -148,4 +148,30 @@ async def send_text():
 async def send_file():
     data = await request.get_json()
     phone = str(data.get("phone", "")).lstrip('+').strip()
-    f_url, text = data.
+    f_url, text = data.get("file"), data.get("text", "")
+    c_id, c_name = data.get("client_id"), data.get("client_name")
+    tg = await get_client()
+    try:
+        sent = await tg.send_file(phone, f_url, caption=text)
+        await log_to_db("1C", phone, text, sender="system_1c", f_url=f_url, c_id=c_id, c_name=c_name, direction="out", tg_id=sent.id)
+        return jsonify({"status": "ok"}), 200
+    except Exception as e: return jsonify({"error": str(e)}), 500
+
+@app.route('/fetch_new', methods=['GET', 'POST'])
+async def fetch_new():
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM outbound_logs WHERE status = 'pending'") as c:
+            rows = [dict(r) for r in await c.fetchall()]
+        if rows:
+            ids = [r['id'] for r in rows]
+            await db.execute(f"UPDATE outbound_logs SET status='ok' WHERE id IN ({','.join(['?']*len(ids))})", ids)
+            await db.commit()
+        return jsonify(rows)
+
+@app.route('/get_file/<filename>')
+async def get_file(filename): 
+    return await send_from_directory(FILES_DIR, filename)
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
