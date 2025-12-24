@@ -41,17 +41,16 @@ async def init_db():
         except: pass 
         await db.commit()
 
-# ИСПОЛЬЗУЕМ СТРОГИЕ ИМЕНОВАННЫЕ АРГУМЕНТЫ
+# Универсальная функция записи в БД
 async def log_to_db(source, phone, text, c_name=None, c_id=None, manager=None, s_number=None, f_url=None, direction='in', tg_id=None):
-    messenger = 'tg'
     created_at = datetime.now()
     try:
         async with aiosqlite.connect(DB_PATH, timeout=10) as db:
             await db.execute("""
                 INSERT INTO outbound_logs 
-                (source, phone, client_name, client_id, manager, sender_number, messenger, message_text, file_url, status, direction, tg_message_id, created_at) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (source, phone, c_name, c_id, manager, s_number, messenger, text, f_url, 'pending', direction, tg_id, created_at))
+                (source, phone, client_name, client_id, manager, sender_number, message_text, file_url, status, direction, tg_message_id, created_at) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (source, phone, c_name, c_id, manager, s_number, text, f_url, 'pending', direction, tg_id, created_at))
             await db.commit()
     except Exception as e:
         print(f"⚠️ ОШИБКА БД: {e}")
@@ -81,16 +80,29 @@ async def start_listener():
         s_id = str(event.sender_id)
         raw_text = (event.raw_text or "").strip()
 
+        # 1. ОТПРАВКА МЕНЕДЖЕРОМ ЧЕРЕЗ ШЛЮЗ (#номер/текст)
         if s_phone in managers_list:
             match = re.search(r'#(\d+)/(.*)', raw_text, re.DOTALL)
             if match:
                 target_phone, message_text = match.group(1).strip(), match.group(2).strip()
                 try:
+                    # Пытаемся получить данные клиента из Телеграм по номеру
+                    real_name, real_id = "Client", target_phone
+                    try:
+                        entity = await tg.get_entity(target_phone)
+                        real_name = f"{getattr(entity, 'first_name', '') or ''} {getattr(entity, 'last_name', '') or ''}".strip() or "Client"
+                        real_id = str(entity.id)
+                    except: pass
+
                     f_url = await save_tg_media(event)
                     sent = await (tg.send_file(target_phone, os.path.join(FILES_DIR, f_url.split('/')[-1]), caption=message_text) if f_url else tg.send_message(target_phone, message_text))
-                    # Для шлюза: manager и s_number заполняем телефоном
-                    await log_to_db(source="Manager", phone=target_phone, text=message_text, c_name="Client", c_id=target_phone, manager=s_phone, s_number=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
-                except: pass
+                    
+                    # ЗАПИСЬ: sender_number = номер менеджера, а client_id/name - данные клиента
+                    await log_to_db(source="Manager", phone=target_phone, text=message_text, c_name=real_name, c_id=real_id, manager=s_phone, s_number=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
+                    await event.reply("✅ Отправлено")
+                except Exception as e: await event.reply(f"❌ Ошибка: {str(e)}")
+        
+        # 2. ВХОДЯЩЕЕ ОТ КЛИЕНТА
         else:
             f_url = await save_tg_media(event)
             await log_to_db(source="Client", phone=s_phone or "Unknown", text=raw_text or "[Файл]", c_name=s_full_name, c_id=s_id, direction="in", tg_id=event.message.id)
@@ -100,15 +112,25 @@ async def startup():
     await init_db()
     asyncio.create_task(start_listener())
 
+# --- API ДЛЯ 1С ---
+
 @app.route('/send', methods=['POST'])
 async def send_text():
     data = await request.get_json()
     phone = str(data.get("phone", "")).lstrip('+').strip()
-    text, c_id, c_name, mgr = data.get("text", ""), data.get("client_id"), data.get("client_name"), data.get("manager")
+    text, mgr = data.get("text", ""), data.get("manager")
     tg = await get_client()
     try:
+        # Получаем данные клиента перед отправкой, чтобы заполнить базу
+        c_name, c_id = "Client", phone
+        try:
+            entity = await tg.get_entity(phone)
+            c_name = f"{getattr(entity, 'first_name', '') or ''} {getattr(entity, 'last_name', '') or ''}".strip() or "Client"
+            c_id = str(entity.id)
+        except: pass
+
         sent = await tg.send_message(phone, text)
-        # Отправка из 1С: s_number=None (пусто)
+        # ЗАПИСЬ: sender_number пустой (None), поля клиента заполнены из TG
         await log_to_db(source="1C", phone=phone, text=text, c_name=c_name, c_id=c_id, manager=mgr, s_number=None, direction="out", tg_id=sent.id)
         return jsonify({"status": "ok"}), 200
     except Exception as e: return jsonify({"error": str(e)}), 500
@@ -117,9 +139,16 @@ async def send_text():
 async def send_file():
     data = await request.get_json()
     phone = str(data.get("phone", "")).lstrip('+').strip()
-    f_url, text, c_id, c_name, mgr = data.get("file"), data.get("text", ""), data.get("client_id"), data.get("client_name"), data.get("manager")
+    f_url, text, mgr = data.get("file"), data.get("text", ""), data.get("manager")
     tg = await get_client()
     try:
+        c_name, c_id = "Client", phone
+        try:
+            entity = await tg.get_entity(phone)
+            c_name = f"{getattr(entity, 'first_name', '') or ''} {getattr(entity, 'last_name', '') or ''}".strip() or "Client"
+            c_id = str(entity.id)
+        except: pass
+
         sent = await tg.send_file(phone, f_url, caption=text)
         await log_to_db(source="1C", phone=phone, text=text, c_name=c_name, c_id=c_id, manager=mgr, s_number=None, f_url=f_url, direction="out", tg_id=sent.id)
         return jsonify({"status": "ok"}), 200
