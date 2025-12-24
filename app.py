@@ -109,13 +109,14 @@ async def start_listener():
         
         # --- БЛОК КЛИЕНТА ---
         else:
-            # Сначала получаем данные отправителя, чтобы избежать ошибки
+            # 1. ПОЛУЧАЕМ ДАННЫЕ ОТПРАВИТЕЛЯ (чтобы исправить ошибку)
             sender = await event.get_sender()
-            sender_phone = getattr(sender, 'phone', None) # Получаем телефон
+            sender_phone = getattr(sender, 'phone', None)
             
-            # Сохраняем файл (если он есть)
+            # 2. СОХРАНЯЕМ ФАЙЛ (если он есть)
             f_url = await save_tg_media(event)
             
+            # 3. ЗАПИСЫВАЕМ В БАЗУ
             await log_to_db(
                 source="Client", 
                 phone=sender_phone or "Unknown", 
@@ -126,7 +127,7 @@ async def start_listener():
                 f_url=f_url,
                 direction="in", 
                 status="pending",
-                tg_id=event.message.id  # Теперь и ID сообщения на месте
+                tg_id=event.message.id  # Это то, что мы добавляли прошлым шагом
             )
 
 @app.before_serving
