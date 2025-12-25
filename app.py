@@ -65,12 +65,32 @@ async def log_to_db(source, phone, text, c_name=None, c_id=None, manager_fio=Non
     except Exception as e: print(f"⚠️ DB Error: {e}")
 
 async def get_topic_info(c_id_or_topic_id, by_topic=False):
-    async with aiosqlite.connect(DB_PATH) as db:
+    async with aiosqlite.connect(DB_PATH, timeout=20) as db:
         db.row_factory = aiosqlite.Row
         query = "SELECT * FROM client_topics WHERE topic_id = ?" if by_topic else "SELECT * FROM client_topics WHERE client_id = ?"
         async with db.execute(query, (str(c_id_or_topic_id),)) as cursor:
             res = await cursor.fetchone()
-            return dict(res) if res else None
+            if not res: return None
+            
+            # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА: Жива ли тема в самом Telegram?
+            try:
+                tg = await get_client()
+                # Запрашиваем список тем у группы
+                topics = await tg(functions.channels.GetForumTopicsRequest(
+                    channel=GROUP_ID, offset_date=None, offset_id=0, offset_topic=0, limit=100
+                ))
+                active_ids = [t.id for t in topics.topics]
+                
+                # Если темы из базы нет в списке активных тем группы
+                if res['topic_id'] not in active_ids:
+                    print(f"⚠️ Тема {res['topic_id']} найдена в базе, но отсутствует в Telegram. Удаляю мусор.")
+                    await db.execute("DELETE FROM client_topics WHERE topic_id = ?", (res['topic_id'],))
+                    await db.commit()
+                    return None
+            except Exception as e:
+                print(f"⚠️ Ошибка проверки темы в TG: {e}")
+            
+            return dict(res)
 
 async def find_last_manager_in_history(c_id):
     try:
