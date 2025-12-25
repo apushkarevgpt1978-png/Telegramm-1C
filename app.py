@@ -148,10 +148,7 @@ async def start_listener():
             elif not event.reply_to_msg_id:
                 await event.reply("ℹ️ Пишите в теме клиента для ответа или используйте `#номер/текст` в общем чате.")
 
-@app.before_serving
-async def startup():
-    await init_db()
-    asyncio.create_task(start_listener())
+
 
 # --- Остальные роуты (/send, /send_file, /fetch_new) оставляем без изменений ---
 @app.route('/send', methods=['POST'])
@@ -194,5 +191,32 @@ async def fetch_new():
 async def get_file(filename): 
     return await send_from_directory(FILES_DIR, filename)
 
+@app.before_serving
+async def startup():
+    await init_db()
+    # Мы не создаем таск, а просто запускаем проверку клиента
+    print("DEBUG: Инициализация БД завершена")
+
+async def run_bot():
+    tg = await get_client()
+    print("DEBUG: Клиент Telegram получен")
+    
+    # Прямо здесь запускаем листенер
+    await start_listener() 
+    print("Бот ГЕНА запущен в режиме ТЕМ!")
+    await tg.run_until_disconnected()
+
 if __name__ == '__main__':
+    # Чтобы Quart и Telethon работали вместе стабильно
+    import asyncio
+    loop = asyncio.get_event_loop()
+    
+    # Инициализируем БД
+    loop.run_until_complete(init_db())
+    
+    # Запускаем бота фоном
+    print("DEBUG: Запуск бота...")
+    loop.create_task(start_listener()) 
+    
+    # Запускаем веб-сервер
     app.run(host='0.0.0.0', port=5000)
