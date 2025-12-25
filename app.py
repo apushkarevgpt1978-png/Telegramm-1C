@@ -74,8 +74,9 @@ async def get_topic_info(c_id_or_topic_id, by_topic=False):
 
 async def find_last_outbound_manager(c_id):
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
             db.row_factory = aiosqlite.Row
+            # Ищем последнее исходящее сообщение именно по client_id
             async with db.execute("""
                 SELECT manager FROM outbound_logs 
                 WHERE client_id = ? AND direction = 'out' AND manager != '' 
@@ -110,59 +111,63 @@ async def start_listener():
 
     @tg.on(events.NewMessage())
     async def handler(event):
+        # ЖЕСТКИЙ ЗАПРЕТ: Игнорируем любые исходящие, чтобы 1С не перебивалась
+        if event.out:
+            return
+
         sender = await event.get_sender()
-        s_phone = str(getattr(sender, 'phone', '') or '').lstrip('+').strip()
         s_id = str(event.sender_id)
         raw_text = (event.raw_text or "").strip()
 
-        # 1. МЕНЕДЖЕР
-        if s_phone in MANAGERS:
-            if raw_text.startswith('#'):
-                match = re.search(r'#(\d+)/(.*)', raw_text, re.DOTALL)
-                if not match: return
-                t_phone, c_name_input = match.group(1).strip(), match.group(2).strip()
-                try:
-                    ent = await tg.get_entity(t_phone)
-                    res = await tg(functions.messages.CreateForumTopicRequest(peer=GROUP_ID, title=f"{c_name_input} {t_phone}"))
-                    topic_id = next((u.id for u in res.updates if hasattr(u, 'id')), None)
-                    if topic_id:
-                        async with aiosqlite.connect(DB_PATH) as db:
-                            await db.execute("INSERT OR REPLACE INTO client_topics (client_id, topic_id, client_name, phone, manager_ref) VALUES (?, ?, ?, ?, ?)",
-                                           (str(ent.id), topic_id, c_name_input, t_phone, s_phone))
-                            await db.commit()
-                        await event.reply(f"✅ Тема создана.")
-                except Exception as e: await event.reply(f"❌ Ошибка: {str(e)}")
-                return
-
-            if event.is_group and event.reply_to_msg_id:
-                row = await get_topic_info(event.reply_to_msg_id, by_topic=True)
-                if row:
-                    msg_source = "Manager"
-                    target_id = int(row['client_id'])
-                    f_url = await save_tg_media(event)
+        # 1. МЕНЕДЖЕР В ГРУППЕ
+        if event.is_group:
+            s_phone = str(getattr(sender, 'phone', '') or '').lstrip('+').strip()
+            if s_phone in MANAGERS:
+                if raw_text.startswith('#'):
+                    match = re.search(r'#(\d+)/(.*)', raw_text, re.DOTALL)
+                    if not match: return
+                    t_phone, c_name_input = match.group(1).strip(), match.group(2).strip()
                     try:
-                        if event.message.media: sent = await tg.send_file(target_id, event.message.media, caption=raw_text)
-                        elif raw_text: sent = await tg.send_message(target_id, raw_text)
-                        else: return
-                        m_fio = MANAGERS.get(s_phone, s_phone)
-                        await log_to_db(source=msg_source, phone=row['phone'], c_name=row['client_name'], text=raw_text, c_id=str(target_id), manager_fio=m_fio, s_number=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
-                    except: pass
+                        ent = await tg.get_entity(t_phone)
+                        res = await tg(functions.messages.CreateForumTopicRequest(peer=GROUP_ID, title=f"{c_name_input} {t_phone}"))
+                        topic_id = next((u.id for u in res.updates if hasattr(u, 'id')), None)
+                        if topic_id:
+                            async with aiosqlite.connect(DB_PATH) as db:
+                                await db.execute("INSERT OR REPLACE INTO client_topics (client_id, topic_id, client_name, phone, manager_ref) VALUES (?, ?, ?, ?, ?)",
+                                               (str(ent.id), topic_id, c_name_input, t_phone, s_phone))
+                                await db.commit()
+                            await event.reply(f"✅ Тема создана.")
+                    except Exception as e: await event.reply(f"❌ Ошибка: {str(e)}")
+                    return
 
-        # 2. КЛИЕНТ (ВХОДЯЩИЕ)
-        elif event.is_private:
+                # Ответ менеджера из темы (здесь source = Manager)
+                if event.reply_to_msg_id:
+                    row = await get_topic_info(event.reply_to_msg_id, by_topic=True)
+                    if row:
+                        target_id = int(row['client_id'])
+                        f_url = await save_tg_media(event)
+                        try:
+                            if event.message.media: sent = await tg.send_file(target_id, event.message.media, caption=raw_text)
+                            elif raw_text: sent = await tg.send_message(target_id, raw_text)
+                            else: return
+                            m_fio = MANAGERS.get(s_phone, s_phone)
+                            await log_to_db(source="Manager", phone=row['phone'], c_name=row['client_name'], text=raw_text, c_id=str(target_id), manager_fio=m_fio, s_number=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
+                        except: pass
+            return
+
+        # 2. ВХОДЯЩЕЕ ОТ КЛИЕНТА (PRIVATE)
+        if event.is_private:
             f_url = await save_tg_media(event)
+            s_phone = str(getattr(sender, 'phone', '') or '').lstrip('+').strip()
             s_full_name = f"{getattr(sender, 'first_name', '') or ''} {getattr(sender, 'last_name', '') or ''}".strip() or "Client"
             
-            # ШАГ 1: Таблица тем
             row = await get_topic_info(s_id)
-            
             if row:
                 msg_source = "Manager"
                 m_fio = MANAGERS.get(row['manager_ref'], "")
                 m_phone = row['manager_ref']
             else:
-                # ШАГ 2: Таблица логов (последний out) + ВСЕГДА 1С
-                msg_source = "1C"
+                msg_source = "1C" # Нет темы -> источник только 1C
                 m_fio = await find_last_outbound_manager(s_id)
                 m_phone = ""
             
@@ -170,7 +175,7 @@ async def start_listener():
             
             if row:
                 try:
-                    if event.message.media: await tg.send_file(GROUP_ID, event.message.media, caption=f"📎 Файл: {raw_text}", reply_to=row['topic_id'])
+                    if event.message.media: await tg.send_file(GROUP_ID, event.message.media, caption=f"📎 {raw_text}", reply_to=row['topic_id'])
                     elif raw_text: await tg.send_message(GROUP_ID, f"💬 {raw_text}", reply_to=row['topic_id'])
                 except: pass
 
@@ -182,6 +187,7 @@ async def send_text():
     try:
         ent = await tg.get_entity(phone)
         sent = await tg.send_message(ent.id, text)
+        # 1C Сама пишет в лог - это единственный источник исходящего в личку
         await log_to_db(source="1C", phone=phone, c_name=f"{ent.first_name or ''} {ent.last_name or ''}", text=text, c_id=str(ent.id), manager_fio=mgr_fio, direction="out", tg_id=sent.id)
         return jsonify({"status": "ok"}), 200
     except Exception as e: return jsonify({"error": str(e)}), 500
