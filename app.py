@@ -76,6 +76,13 @@ async def save_tg_media(event):
         return f"{BASE_URL}/get_file/{filename}"
     return None
 
+async def get_topic_from_db(c_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT topic_id FROM client_topics WHERE client_id = ?", (str(c_id),)) as cursor:
+            row = await cursor.fetchone()
+            return row['topic_id'] if row else None
+
 async def start_listener():
     tg = await get_client()
     managers_list = [m.strip() for m in MANAGERS if m.strip()]
