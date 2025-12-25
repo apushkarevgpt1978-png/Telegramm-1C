@@ -6,11 +6,15 @@ from telethon import TelegramClient, events
 app = Quart(__name__)
 
 # --- НАСТРОЙКИ ---
-API_ID = int(os.environ.get('API_ID', 0))
-API_HASH = os.environ.get('API_HASH', '')
-SESSION_PATH = os.environ.get('TG_SESSION_PATH', '/app/data/GenaAPI')
+API_ID = 23131386
+API_HASH = '690d8745b7a329c084f2bb092e541002'
+SESSION_PATH = '/app/data/GenaAPI'
+GROUP_ID = -1003599844429
+MANAGERS = ['79153019495']
+
+
 DB_PATH = os.environ.get('DB_PATH', '/app/data/gateway_messages.db')
-MANAGERS = os.environ.get('MANAGERS_PHONES', '').split(',')
+
 FILES_DIR = '/app/files'
 BASE_URL = os.environ.get('BASE_URL', 'http://192.168.121.99:5000')
 
