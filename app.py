@@ -67,6 +67,12 @@ async def get_topic_from_db(c_id):
             row = await cursor.fetchone()
             return row['topic_id'] if row else None
 
+async def delete_broken_topic(topic_id):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM client_topics WHERE topic_id = ?", (topic_id,))
+        await db.commit()
+    print(f"🗑️ Удалена битая ссылка на тему: {topic_id}")
+
 async def save_tg_media(event):
     if event.message.media:
         file_ext = ".jpg"
@@ -116,13 +122,20 @@ async def start_listener():
                                 await db.commit()
                             await event.reply(f"✅ Диалог создан! ID: {topic_id}. Теперь сообщения будут приходить в отдельную ветку.")
                     else:
-                        f_url = await save_tg_media(event)
-                        sent = await (tg.send_file(ent.id, os.path.join(FILES_DIR, f_url.split('/')[-1]), caption=content) if f_url else tg.send_message(ent.id, content))
-                        await log_to_db(source="Manager", phone=target_phone, text=content, c_id=c_id, manager=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
-                        await tg.send_message(GROUP_ID, f"📤 Мой ответ: {content}", reply_to=topic_id)
-                        await event.reply("✅ Отправлено и добавлено в диалог")
+                        try:
+                            f_url = await save_tg_media(event)
+                            sent = await (tg.send_file(ent.id, os.path.join(FILES_DIR, f_url.split('/')[-1]), caption=content) if f_url else tg.send_message(ent.id, content))
+                            await log_to_db(source="Manager", phone=target_phone, text=content, c_id=c_id, manager=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
+                            await tg.send_message(GROUP_ID, f"📤 Мой ответ: {content}", reply_to=topic_id)
+                            await event.reply("✅ Отправлено и добавлено в диалог")
+                        except Exception as inner_e:
+                            if "reply_to_msg_id_invalid" in str(inner_e).lower():
+                                await delete_broken_topic(topic_id)
+                                await event.reply("⚠️ Старый диалог был удален в Telegram. Попробуйте еще раз, чтобы я создал новый.")
+                            else: raise inner_e
                 except Exception as e:
-                    await event.reply(f"❌ Ошибка: {str(e)}")
+                    if "entity" in str(e).lower(): await event.reply("❌ Пользователь не найден")
+                    else: await event.reply(f"❌ Ошибка: {str(e)}")
                 return
 
             if event.is_group and event.reply_to:
@@ -135,7 +148,7 @@ async def start_listener():
                             sent = await tg.send_message(target_id, raw_text)
                             await log_to_db(source="Manager", phone="", text=raw_text, c_id=str(target_id), manager=s_phone, direction="out", tg_id=sent.id)
 
-        # --- 2. ЛОГИКА КЛИЕНТА (Входящие) ---
+        # --- 2. ЛОГИКА КЛИЕНТА ---
         elif event.is_private:
             f_url = await save_tg_media(event)
             s_full_name = f"{getattr(sender, 'first_name', '') or ''} {getattr(sender, 'last_name', '') or ''}".strip() or "Unknown"
@@ -143,21 +156,16 @@ async def start_listener():
             
             topic_id = await get_topic_from_db(s_id)
             if topic_id:
-                await tg.send_message(GROUP_ID, f"💬 {raw_text}" if not f_url else f"📎 Файл: {raw_text}", reply_to=topic_id)
+                try:
+                    await tg.send_message(GROUP_ID, f"💬 {raw_text}" if not f_url else f"📎 Файл: {raw_text}", reply_to=topic_id)
+                except Exception as e:
+                    if "reply_to_msg_id_invalid" in str(e).lower(): await delete_broken_topic(topic_id)
 
-    # --- 3. ЛОГИКА УДАЛЕНИЯ ТЕМЫ (отдельный обработчик) ---
     @tg.on(events.ChatAction)
     async def action_handler(event):
         if event.is_group and event.action_message:
-            try:
-                if isinstance(event.action_message.action, types.MessageActionTopicDelete):
-                    deleted_topic_id = event.action_message.reply_to_msg_id
-                    async with aiosqlite.connect(DB_PATH) as db:
-                        await db.execute("DELETE FROM client_topics WHERE topic_id = ?", (deleted_topic_id,))
-                        await db.commit()
-                    print(f"🗑️ Тема {deleted_topic_id} удалена из базы.")
-            except Exception as e:
-                print(f"⚠️ Ошибка при удалении темы: {e}")
+            if isinstance(event.action_message.action, types.MessageActionTopicDelete):
+                await delete_broken_topic(event.action_message.reply_to_msg_id)
 
 @app.before_serving
 async def startup():
@@ -167,15 +175,16 @@ async def startup():
 @app.route('/send', methods=['POST'])
 async def send_text():
     data = await request.get_json()
-    phone = str(data.get("phone", "")).lstrip('+').strip()
-    text, mgr = data.get("text", ""), data.get("manager")
+    phone, text, mgr = str(data.get("phone", "")).lstrip('+').strip(), data.get("text", ""), data.get("manager")
     tg = await get_client()
     try:
         ent = await tg.get_entity(phone)
         sent = await tg.send_message(ent.id, text)
         await log_to_db(source="1C", phone=phone, text=text, c_id=str(ent.id), manager=mgr, direction="out", tg_id=sent.id)
         t_id = await get_topic_from_db(ent.id)
-        if t_id: await tg.send_message(GROUP_ID, f"🤖 (Из 1С): {text}", reply_to=t_id)
+        if t_id:
+            try: await tg.send_message(GROUP_ID, f"🤖 (Из 1С): {text}", reply_to=t_id)
+            except: await delete_broken_topic(t_id)
         return jsonify({"status": "ok"}), 200
     except Exception as e: return jsonify({"error": str(e)}), 500
 
@@ -190,7 +199,9 @@ async def send_file():
         sent = await tg.send_file(ent.id, f_url, caption=text)
         await log_to_db(source="1C", phone=phone, text=text, c_id=str(ent.id), manager=mgr, f_url=f_url, direction="out", tg_id=sent.id)
         t_id = await get_topic_from_db(ent.id)
-        if t_id: await tg.send_message(GROUP_ID, f"🤖 (Из 1С прислан файл): {text}", reply_to=t_id)
+        if t_id:
+            try: await tg.send_message(GROUP_ID, f"🤖 (Из 1С прислан файл): {text}", reply_to=t_id)
+            except: await delete_broken_topic(t_id)
         return jsonify({"status": "ok"}), 200
     except Exception as e: return jsonify({"error": str(e)}), 500
 
@@ -207,8 +218,7 @@ async def fetch_new():
         return jsonify(rows)
 
 @app.route('/get_file/<filename>')
-async def get_file(filename): 
-    return await send_from_directory(FILES_DIR, filename)
+async def get_file(filename): return await send_from_directory(FILES_DIR, filename)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
