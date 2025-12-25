@@ -159,7 +159,7 @@ async def start_listener():
                 if topic_id:
                     await tg.send_message(GROUP_ID, f"💬 {raw_text}" if not f_url else f"📎 Файл: {raw_text}", reply_to=topic_id)
     
-            # --- ЛОГИКА УДАЛЕНИЯ ТЕМЫ ---
+        # --- ЛОГИКА УДАЛЕНИЯ ТЕМЫ ---
         @tg.on(events.ChatAction)
         async def action_handler(event):
             # Проверяем, что это удаление темы (ветки форума)
