@@ -16,7 +16,7 @@ MANAGERS = ['79153019495']
 DB_PATH = os.environ.get('DB_PATH', '/app/data/gateway_messages.db')
 
 FILES_DIR = '/app/files'
-BASE_URL = os.environ.get('BASE_URL', 'http://192.168.121.99:5000')
+BASE_URL = os.environ.get('BASE_URL', 'http://192.168.121.99:5001')
 
 if not os.path.exists(FILES_DIR): os.makedirs(FILES_DIR)
 
