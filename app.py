@@ -22,8 +22,18 @@ client = None
 async def get_client():
     global client
     if client is None:
+        print("DEBUG: Пытаюсь подключить клиента Telethon...")
         client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
-        await client.start()
+        try:
+            # Настройка: не запрашивать ввод, если не залогинены - просто выдать ошибку
+            await client.connect()
+            if not await client.is_user_authorized():
+                print("⚠️ ОШИБКА: Аккаунт Гены не авторизован! Нужно запустить локально и создать .session файл.")
+                return None
+            print("DEBUG: Авторизация успешна!")
+        except Exception as e:
+            print(f"⚠️ КРИТИЧЕСКАЯ ОШИБКА ТЕЛЕГРАМ: {e}")
+            return None
     return client
 
 async def init_db():
