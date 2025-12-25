@@ -65,36 +65,22 @@ async def log_to_db(source, phone, text, c_name=None, c_id=None, manager_fio=Non
     except Exception as e: print(f"⚠️ DB Error: {e}")
 
 async def get_topic_info(c_id_or_topic_id, by_topic=False):
-    async with aiosqlite.connect(DB_PATH, timeout=20) as db:
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
         db.row_factory = aiosqlite.Row
         query = "SELECT * FROM client_topics WHERE topic_id = ?" if by_topic else "SELECT * FROM client_topics WHERE client_id = ?"
         async with db.execute(query, (str(c_id_or_topic_id),)) as cursor:
             res = await cursor.fetchone()
-            if not res: return None
-            
-            # ПРОВЕРКА В TELEGRAM (Метод поправлен на messages.GetDiscussionMessageRequest)
-            try:
-                tg = await get_client()
-                # Мы пытаемся получить сервисное сообщение темы. Если темы нет - вылетит ошибка.
-                await tg(functions.messages.GetDiscussionMessageRequest(
-                    peer=GROUP_ID,
-                    msg_id=int(res['topic_id'])
-                ))
-            except Exception as e:
-                # Если Telegram вернул ошибку, значит темы не существует
-                print(f"⚠️ Тема {res['topic_id']} невалидна в TG. Очистка базы. Причина: {e}")
-                async with aiosqlite.connect(DB_PATH, timeout=20) as db_del:
-                    await db_del.execute("DELETE FROM client_topics WHERE topic_id = ?", (res['topic_id'],))
-                    await db_del.commit()
-                return None
-            
-            return dict(res)
+            return dict(res) if res else None
 
-async def find_last_manager_in_history(c_id):
+async def find_last_outbound_manager(c_id):
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
-            async with db.execute("SELECT manager FROM outbound_logs WHERE client_id = ? AND manager != '' ORDER BY created_at DESC LIMIT 1", (str(c_id),)) as cursor:
+            async with db.execute("""
+                SELECT manager FROM outbound_logs 
+                WHERE client_id = ? AND direction = 'out' AND manager != '' 
+                ORDER BY created_at DESC LIMIT 1
+            """, (str(c_id),)) as cursor:
                 row = await cursor.fetchone()
                 return row['manager'] if row else ""
     except: return ""
@@ -121,7 +107,6 @@ async def start_listener():
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute("DELETE FROM client_topics WHERE topic_id = ?", (t_id,))
                 await db.commit()
-            print(f"🗑️ ТЕМА {t_id} УДАЛЕНА ИЗ БАЗЫ")
 
     @tg.on(events.NewMessage())
     async def handler(event):
@@ -130,7 +115,7 @@ async def start_listener():
         s_id = str(event.sender_id)
         raw_text = (event.raw_text or "").strip()
 
-        # 1. МЕНЕДЖЕР ПИШЕТ
+        # 1. МЕНЕДЖЕР
         if s_phone in MANAGERS:
             if raw_text.startswith('#'):
                 match = re.search(r'#(\d+)/(.*)', raw_text, re.DOTALL)
@@ -151,46 +136,37 @@ async def start_listener():
 
             if event.is_group and event.reply_to_msg_id:
                 row = await get_topic_info(event.reply_to_msg_id, by_topic=True)
-                
-                # СТРОГАЯ ПРОВЕРКА ИСТОЧНИКА
                 if row:
                     msg_source = "Manager"
                     target_id = int(row['client_id'])
-                    c_phone = row['phone']
-                    c_name = row['client_name']
-                else:
-                    msg_source = "1C"
-                    # Если темы нет в базе, мы не знаем кому слать из этой ветки
-                    return 
+                    f_url = await save_tg_media(event)
+                    try:
+                        if event.message.media: sent = await tg.send_file(target_id, event.message.media, caption=raw_text)
+                        elif raw_text: sent = await tg.send_message(target_id, raw_text)
+                        else: return
+                        m_fio = MANAGERS.get(s_phone, s_phone)
+                        await log_to_db(source=msg_source, phone=row['phone'], c_name=row['client_name'], text=raw_text, c_id=str(target_id), manager_fio=m_fio, s_number=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
+                    except: pass
 
-                f_url = await save_tg_media(event)
-                try:
-                    if event.message.media: sent = await tg.send_file(target_id, event.message.media, caption=raw_text)
-                    elif raw_text: sent = await tg.send_message(target_id, raw_text)
-                    else: return
-                    m_fio = MANAGERS.get(s_phone, s_phone)
-                    await log_to_db(source=msg_source, phone=c_phone, c_name=c_name, text=raw_text, c_id=str(target_id), manager_fio=m_fio, s_number=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
-                    print(f"📤 Исходящее: {msg_source} | Тема в базе: {bool(row)}")
-                except Exception as e: print(f"🔴 Ошибка отправки: {e}")
-
-        # 2. КЛИЕНТ ПИШЕТ (ВХОДЯЩИЕ)
+        # 2. КЛИЕНТ (ВХОДЯЩИЕ)
         elif event.is_private:
             f_url = await save_tg_media(event)
             s_full_name = f"{getattr(sender, 'first_name', '') or ''} {getattr(sender, 'last_name', '') or ''}".strip() or "Client"
+            
+            # ШАГ 1: Таблица тем
             row = await get_topic_info(s_id)
             
-            # СТРОГАЯ ПРОВЕРКА ИСТОЧНИКА
             if row:
                 msg_source = "Manager"
                 m_fio = MANAGERS.get(row['manager_ref'], "")
                 m_phone = row['manager_ref']
             else:
-                msg_source = "1C" # НЕТ ТЕМЫ - ТОЛЬКО 1C
-                m_fio = await find_last_manager_in_history(s_id)
+                # ШАГ 2: Таблица логов (последний out) + ВСЕГДА 1С
+                msg_source = "1C"
+                m_fio = await find_last_outbound_manager(s_id)
                 m_phone = ""
             
             await log_to_db(source=msg_source, phone=s_phone, text=raw_text, c_name=s_full_name, c_id=s_id, manager_fio=m_fio, s_number=m_phone, f_url=f_url, direction="in", tg_id=event.message.id)
-            print(f"📥 Входящее: {msg_source} | Тема в базе: {bool(row)}")
             
             if row:
                 try:
@@ -198,7 +174,6 @@ async def start_listener():
                     elif raw_text: await tg.send_message(GROUP_ID, f"💬 {raw_text}", reply_to=row['topic_id'])
                 except: pass
 
-# --- API ROUTES ---
 @app.route('/send', methods=['POST'])
 async def send_text():
     data = await request.get_json()
