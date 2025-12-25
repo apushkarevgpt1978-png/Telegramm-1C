@@ -106,7 +106,7 @@ async def start_listener():
         s_id = str(event.sender_id)
         raw_text = (event.raw_text or "").strip()
 
-        # 1. МЕНЕДЖЕР ПИШЕТ
+        # 1. МЕНЕДЖЕР ПИШЕТ ИЗ ТЕМЫ
         if s_phone in MANAGERS:
             if raw_text.startswith('#'):
                 match = re.search(r'#(\d+)/(.*)', raw_text, re.DOTALL)
@@ -131,30 +131,31 @@ async def start_listener():
                 if row:
                     target_id = int(row['client_id'])
                     f_url = await save_tg_media(event)
-                    
-                    # FIX ОШИБКИ: Отправляем либо медиа, либо текст, либо оба
                     try:
                         if event.message.media:
                             sent = await tg.send_file(target_id, event.message.media, caption=raw_text)
                         elif raw_text:
                             sent = await tg.send_message(target_id, raw_text)
-                        else:
-                            return # Игнорируем пустые сообщения без медиа
+                        else: return
 
                         m_fio = MANAGERS.get(s_phone, s_phone)
+                        # ПРАВКА: source = Manager (ручной ответ из темы)
                         await log_to_db(source="Manager", phone=row['phone'], c_name=row['client_name'], text=raw_text, c_id=str(target_id), manager_fio=m_fio, s_number=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
-                    except Exception as e:
-                        print(f"🔴 Ошибка отправки менеджеру: {e}")
+                    except Exception as e: print(f"🔴 Ошибка отправки: {e}")
 
-        # 2. КЛИЕНТ ПИШЕТ
+        # 2. КЛИЕНТ ПИШЕТ В ТЕМУ
         elif event.is_private:
             f_url = await save_tg_media(event)
             s_full_name = f"{getattr(sender, 'first_name', '') or ''} {getattr(sender, 'last_name', '') or ''}".strip() or "Client"
             row = await get_topic_info(s_id)
+            
+            # ПРАВКА: Если есть тема, то source = Manager (диалог в рамках темы), иначе просто Client
+            msg_source = "Manager" if row else "Client"
+            
             m_phone = row['manager_ref'] if row else ""
             m_fio = MANAGERS.get(m_phone, "") if m_phone else ""
             
-            await log_to_db(source="Client", phone=s_phone, text=raw_text, c_name=s_full_name, c_id=s_id, manager_fio=m_fio, s_number=m_phone, f_url=f_url, direction="in", tg_id=event.message.id)
+            await log_to_db(source=msg_source, phone=s_phone, text=raw_text, c_name=s_full_name, c_id=s_id, manager_fio=m_fio, s_number=m_phone, f_url=f_url, direction="in", tg_id=event.message.id)
             
             if row:
                 try:
@@ -169,7 +170,7 @@ async def startup():
     await init_db()
     asyncio.create_task(start_listener())
 
-# 3. API 1C
+# 3. API РОУТЫ (1С)
 @app.route('/send', methods=['POST'])
 async def send_text():
     data = await request.get_json()
@@ -179,6 +180,7 @@ async def send_text():
         ent = await tg.get_entity(phone)
         c_name = f"{getattr(ent, 'first_name', '') or ''} {getattr(ent, 'last_name', '') or ''}".strip() or "Client"
         sent = await tg.send_message(ent.id, text)
+        # ПРАВКА: source = 1C (автоматическая отправка)
         await log_to_db(source="1C", phone=phone, c_name=c_name, text=text, c_id=str(ent.id), manager_fio=mgr_fio, s_number="", direction="out", tg_id=sent.id)
         row = await get_topic_info(ent.id)
         if row:
@@ -196,12 +198,11 @@ async def send_file():
         ent = await tg.get_entity(phone)
         c_name = f"{getattr(ent, 'first_name', '') or ''} {getattr(ent, 'last_name', '') or ''}".strip() or "Client"
         sent = await tg.send_file(ent.id, f_url, caption=text)
+        # ПРАВКА: source = 1C (автоматическая отправка файла)
         await log_to_db(source="1C", phone=phone, c_name=c_name, text=text, c_id=str(ent.id), manager_fio=mgr_fio, s_number="", f_url=f_url, direction="out", tg_id=sent.id)
         row = await get_topic_info(ent.id)
         if row:
-            try:
-                # В тему пересылаем сам файл
-                await tg.send_file(GROUP_ID, f_url, caption=f"🤖 1C Файл: {text}", reply_to=row['topic_id'])
+            try: await tg.send_file(GROUP_ID, f_url, caption=f"🤖 1C Файл: {text}", reply_to=row['topic_id'])
             except: pass
         return jsonify({"status": "ok"}), 200
     except Exception as e: return jsonify({"error": str(e)}), 500
