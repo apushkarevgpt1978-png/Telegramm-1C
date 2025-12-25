@@ -217,16 +217,33 @@ async def run_bot():
     await tg.run_until_disconnected()
 
 if __name__ == '__main__':
-    # Чтобы Quart и Telethon работали вместе стабильно
     import asyncio
     loop = asyncio.get_event_loop()
     
-    # Инициализируем БД
+    print("--- ЗАПУСК ГЕНЫ ---")
+    
+    # 1. Инициализируем БД
     loop.run_until_complete(init_db())
+    print("1. БД готова")
     
-    # Запускаем бота фоном
-    print("DEBUG: Запуск бота...")
-    loop.create_task(start_listener()) 
+    # 2. Пробуем подключить Телеграм с ПРОВЕРКОЙ
+    async def check_auth():
+        tg = await get_client()
+        if tg:
+            try:
+                # connect() не блокирует поток так сильно, как start()
+                await tg.connect()
+                if not await tg.is_user_authorized():
+                    print("⚠️ ВНИМАНИЕ: Аккаунт ГЕНА не авторизован!")
+                    print("⚠️ Нужно удалить файл сессии и запустить код локально, чтобы войти.")
+                else:
+                    print("2. Телеграм авторизован успешно!")
+                    loop.create_task(start_listener())
+            except Exception as e:
+                print(f"⚠️ Ошибка при проверке авторизации: {e}")
+
+    loop.run_until_complete(check_auth())
     
-    # Запускаем веб-сервер
+    # 3. Запускаем сервер (он точно должен запуститься теперь)
+    print("3. Запуск веб-сервера...")
     app.run(host='0.0.0.0', port=5000)
