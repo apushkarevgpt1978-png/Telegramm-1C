@@ -153,7 +153,7 @@ async def start_listener():
                             sent = await tg.send_message(target_id, raw_text)
                             await log_to_db(source="Manager", phone="", text=raw_text, c_id=str(target_id), manager=s_phone, direction="out", tg_id=sent.id)
 
-        # --- 2. ЛОГИКА КЛИЕНТА ---
+        # --- 2. ЛОГИКА КЛИЕНТА (Входящие) ---
         elif event.is_private:
             f_url = await save_tg_media(event)
             s_full_name = f"{getattr(sender, 'first_name', '') or ''} {getattr(sender, 'last_name', '') or ''}".strip() or "Unknown"
@@ -162,7 +162,12 @@ async def start_listener():
             topic_id = await get_topic_from_db(s_id)
             if topic_id:
                 try:
-                    await tg.send_message(GROUP_ID, f"💬 {raw_text}" if not f_url else f"📎 Файл: {raw_text}", reply_to=topic_id)
+                    # Если есть файл, отправляем его вместе с текстом (caption)
+                    if event.message.media:
+                        await tg.send_file(GROUP_ID, event.message.media, caption=f"📎 Файл от клиента: {raw_text or ''}", reply_to=topic_id)
+                    else:
+                        # Если только текст
+                        await tg.send_message(GROUP_ID, f"💬 {raw_text}", reply_to=topic_id)
                 except Exception as e:
                     if "reply_to_msg_id_invalid" in str(e).lower(): 
                         await delete_broken_topic(topic_id)
