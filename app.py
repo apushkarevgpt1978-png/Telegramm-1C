@@ -166,7 +166,7 @@ async def create_test_topic():
     tg = await get_client()
     try:
         # Пытаемся создать тему с названием "Тестовая тема Гены"
-        result = await tg(functions.channels.CreateForumTopicRequest(
+        result = await tg(functions.messages.CreateForumTopicRequest(
             channel=GROUP_ID,
             title="Тестовая тема Гены"
         ))
