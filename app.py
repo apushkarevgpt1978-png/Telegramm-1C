@@ -154,10 +154,31 @@ async def start_listener():
             # Пишем в базу для 1С
             await log_to_db(source="Client", phone=s_phone, text=raw_text or "[Файл]", c_name=s_full_name, c_id=s_id, f_url=f_url, direction="in", tg_id=event.message.id)
             
-            # Если есть тема - пересылаем менеджеру
-            topic_id = await get_topic_from_db(s_id)
-            if topic_id:
-                await tg.send_message(GROUP_ID, f"💬 {raw_text}" if not f_url else f"📎 Файл: {raw_text}", reply_to=topic_id)
+                # Если есть тема - пересылаем менеджеру
+                topic_id = await get_topic_from_db(s_id)
+                if topic_id:
+                    await tg.send_message(GROUP_ID, f"💬 {raw_text}" if not f_url else f"📎 Файл: {raw_text}", reply_to=topic_id)
+    
+            # --- ЛОГИКА УДАЛЕНИЯ ТЕМЫ ---
+        @tg.on(events.ChatAction)
+        async def action_handler(event):
+            # Проверяем, что это удаление темы (ветки форума)
+            if event.is_group and event.action_message and hasattr(event.action_message.action, 'topic'):
+                # В некоторых версиях Telethon удаление темы ловится через DeletedMessages или специфические Action
+                # Но самый надежный способ для форума — это ловить удаление через action
+                try:
+                    # Если событие — удаление темы
+                    if isinstance(event.action_message.action, types.MessageActionTopicDelete):
+                        # Нам нужно понять, какая тема удалена. К сожалению, API не всегда отдает ID в action.
+                        # Поэтому мы проверяем id сообщения, которое было "головой" темы
+                        deleted_topic_id = event.action_message.reply_to_msg_id
+                        
+                        async with aiosqlite.connect(DB_PATH) as db:
+                            await db.execute("DELETE FROM client_topics WHERE topic_id = ?", (deleted_topic_id,))
+                            await db.commit()
+                        print(f"🗑️ Тема {deleted_topic_id} удалена из базы, так как она удалена в Telegram.")
+                except Exception as e:
+                    print(f"⚠️ Ошибка при очистке базы после удаления темы: {e}")
 
 @app.before_serving
 async def startup():
