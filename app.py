@@ -75,7 +75,7 @@ async def find_last_manager_in_history(c_id):
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
-            # Берем только имя, игнорируя source из истории
+            # Берем только ФИО последнего менеджера для этого клиента
             async with db.execute("SELECT manager FROM outbound_logs WHERE client_id = ? AND manager != '' ORDER BY created_at DESC LIMIT 1", (str(c_id),)) as cursor:
                 row = await cursor.fetchone()
                 return row['manager'] if row else ""
@@ -111,8 +111,9 @@ async def start_listener():
         s_id = str(event.sender_id)
         raw_text = (event.raw_text or "").strip()
 
-        # 1. МЕНЕДЖЕР
+        # 1. СООБЩЕНИЯ ОТ МЕНЕДЖЕРА
         if s_phone in MANAGERS:
+            # Создание темы по маске
             if raw_text.startswith('#'):
                 match = re.search(r'#(\d+)/(.*)', raw_text, re.DOTALL)
                 if not match: return
@@ -130,11 +131,11 @@ async def start_listener():
                 except Exception as e: await event.reply(f"❌ Ошибка: {str(e)}")
                 return
 
+            # Ответ в теме
             if event.is_group and event.reply_to_msg_id:
                 row = await get_topic_info(event.reply_to_msg_id, by_topic=True)
-                
-                # FIX: Если записи в client_topics нет, значит тема удалена -> ставим 1C
-                current_source = "Manager" if row else "1C"
+                # Если ветки нет в базе, это НЕ Manager, это 1C/Системное
+                msg_source = "Manager" if row else "1C"
                 
                 if row:
                     target_id = int(row['client_id'])
@@ -144,24 +145,26 @@ async def start_listener():
                         elif raw_text: sent = await tg.send_message(target_id, raw_text)
                         else: return
                         m_fio = MANAGERS.get(s_phone, s_phone)
-                        await log_to_db(source=current_source, phone=row['phone'], c_name=row['client_name'], text=raw_text, c_id=str(target_id), manager_fio=m_fio, s_number=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
+                        await log_to_db(source=msg_source, phone=row['phone'], c_name=row['client_name'], text=raw_text, c_id=str(target_id), manager_fio=m_fio, s_number=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
                     except: pass
 
-        # 2. КЛИЕНТ (ВХОДЯЩИЕ)
+        # 2. ВХОДЯЩИЕ ОТ КЛИЕНТА
         elif event.is_private:
             f_url = await save_tg_media(event)
             s_full_name = f"{getattr(sender, 'first_name', '') or ''} {getattr(sender, 'last_name', '') or ''}".strip() or "Client"
             row = await get_topic_info(s_id)
             
-            # FIX: Логика источника теперь изолирована от истории
+            # СТРОГАЯ ПРОВЕРКА ИСТОЧНИКА
             if row:
+                # Есть активная тема в базе -> это Manager
                 msg_source = "Manager"
-                m_fio = MANAGERS.get(row['manager_ref'], "")
                 m_phone = row['manager_ref']
+                m_fio = MANAGERS.get(m_phone, "")
             else:
-                msg_source = "1C" # Темы нет в базе -> источник только 1C
-                m_fio = await find_last_manager_in_history(s_id)
+                # Темы нет в базе -> это ВСЕГДА 1C, даже если нашли имя в истории
+                msg_source = "1C"
                 m_phone = ""
+                m_fio = await find_last_manager_in_history(s_id)
             
             await log_to_db(source=msg_source, phone=s_phone, text=raw_text, c_name=s_full_name, c_id=s_id, manager_fio=m_fio, s_number=m_phone, f_url=f_url, direction="in", tg_id=event.message.id)
             
