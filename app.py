@@ -146,4 +146,87 @@ async def start_listener():
             if event.is_group and event.reply_to:
                 async with aiosqlite.connect(DB_PATH) as db:
                     db.row_factory = aiosqlite.Row
-                    async with db.execute("SELECT client_id FROM client_topics WHERE topic_id = ?", (event.reply_to_msg_id
+                    async with db.execute("SELECT client_id FROM client_topics WHERE topic_id = ?", (event.reply_to_msg_id,)) as c:
+                        row = await c.fetchone()
+                        if row:
+                            target_id = int(row['client_id'])
+                            sent = await tg.send_message(target_id, raw_text)
+                            await log_to_db(source="Manager", phone="", text=raw_text, c_id=str(target_id), manager=s_phone, direction="out", tg_id=sent.id)
+
+        # --- 2. ЛОГИКА КЛИЕНТА ---
+        elif event.is_private:
+            f_url = await save_tg_media(event)
+            s_full_name = f"{getattr(sender, 'first_name', '') or ''} {getattr(sender, 'last_name', '') or ''}".strip() or "Unknown"
+            await log_to_db(source="Client", phone=s_phone, text=raw_text or "[Файл]", c_name=s_full_name, c_id=s_id, f_url=f_url, direction="in", tg_id=event.message.id)
+            
+            topic_id = await get_topic_from_db(s_id)
+            if topic_id:
+                try:
+                    await tg.send_message(GROUP_ID, f"💬 {raw_text}" if not f_url else f"📎 Файл: {raw_text}", reply_to=topic_id)
+                except Exception as e:
+                    if "reply_to_msg_id_invalid" in str(e).lower(): 
+                        await delete_broken_topic(topic_id)
+
+    # --- 3. ЛОГИКА УДАЛЕНИЯ ТЕМЫ ---
+    @tg.on(events.ChatAction)
+    async def action_handler(event):
+        if event.is_group and event.action_message:
+            if isinstance(event.action_message.action, types.MessageActionTopicDelete):
+                await delete_broken_topic(event.action_message.reply_to_msg_id)
+
+@app.before_serving
+async def startup():
+    await init_db()
+    asyncio.create_task(start_listener())
+
+@app.route('/send', methods=['POST'])
+async def send_text():
+    data = await request.get_json()
+    phone, text, mgr = str(data.get("phone", "")).lstrip('+').strip(), data.get("text", ""), data.get("manager")
+    tg = await get_client()
+    try:
+        ent = await tg.get_entity(phone)
+        sent = await tg.send_message(ent.id, text)
+        await log_to_db(source="1C", phone=phone, text=text, c_id=str(ent.id), manager=mgr, direction="out", tg_id=sent.id)
+        t_id = await get_topic_from_db(ent.id)
+        if t_id:
+            try: await tg.send_message(GROUP_ID, f"🤖 (Из 1С): {text}", reply_to=t_id)
+            except: await delete_broken_topic(t_id)
+        return jsonify({"status": "ok"}), 200
+    except Exception as e: return jsonify({"error": str(e)}), 500
+
+@app.route('/send_file', methods=['POST'])
+async def send_file():
+    data = await request.get_json()
+    phone = str(data.get("phone", "")).lstrip('+').strip()
+    f_url, text, mgr = data.get("file"), data.get("text", ""), data.get("manager")
+    tg = await get_client()
+    try:
+        ent = await tg.get_entity(phone)
+        sent = await tg.send_file(ent.id, f_url, caption=text)
+        await log_to_db(source="1C", phone=phone, text=text, c_id=str(ent.id), manager=mgr, f_url=f_url, direction="out", tg_id=sent.id)
+        t_id = await get_topic_from_db(ent.id)
+        if t_id:
+            try: await tg.send_message(GROUP_ID, f"🤖 (Из 1С прислан файл): {text}", reply_to=t_id)
+            except: await delete_broken_topic(t_id)
+        return jsonify({"status": "ok"}), 200
+    except Exception as e: return jsonify({"error": str(e)}), 500
+
+@app.route('/fetch_new', methods=['GET', 'POST'])
+async def fetch_new():
+    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM outbound_logs WHERE status = 'pending'") as c:
+            rows = [dict(r) for r in await c.fetchall()]
+        if rows:
+            ids = [r['id'] for r in rows]
+            await db.execute(f"UPDATE outbound_logs SET status='ok' WHERE id IN ({','.join(['?']*len(ids))})", ids)
+            await db.commit()
+        return jsonify(rows)
+
+@app.route('/get_file/<filename>')
+async def get_file(filename): 
+    return await send_from_directory(FILES_DIR, filename)
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=5000)
