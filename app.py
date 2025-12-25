@@ -163,15 +163,23 @@ async def get_file(filename):
 
 @app.route('/create_test_topic')
 async def create_test_topic():
+    global GROUP_ID  # Указываем, что берем ID группы из настроек наверху
     tg = await get_client()
     try:
-        # Пытаемся создать тему с названием "Тестовая тема Гены"
+        # Используем peer=GROUP_ID и правильный путь к функции
         result = await tg(functions.messages.CreateForumTopicRequest(
-            channel=GROUP_ID,
+            peer=GROUP_ID,
             title="Тестовая тема Гены"
         ))
-        # Получаем ID созданной темы
-        topic_id = result.updates[0].id 
+        
+        # В некоторых версиях Telethon ID темы лежит в разных местах updates
+        # Этот способ самый надежный для поиска id новой темы
+        topic_id = None
+        for update in result.updates:
+            if hasattr(update, 'id'):
+                topic_id = update.id
+                break
+        
         return f"✅ Тема создана! ID темы: {topic_id}"
     except Exception as e:
         return f"❌ Ошибка: {str(e)}"
