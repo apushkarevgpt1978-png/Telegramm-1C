@@ -66,6 +66,7 @@ async def log_to_db(source, phone, text, c_name=None, c_id=None, manager_fio=Non
     except Exception as e: print(f"⚠️ DB Error: {e}")
 
 async def get_topic_info_with_retry(c_id_or_topic_id, by_topic=False):
+    """Проверяет тему в базе и подтверждает её существование в Telegram"""
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
         db.row_factory = aiosqlite.Row
         query = "SELECT * FROM client_topics WHERE topic_id = ?" if by_topic else "SELECT * FROM client_topics WHERE client_id = ?"
@@ -75,12 +76,13 @@ async def get_topic_info_with_retry(c_id_or_topic_id, by_topic=False):
             
             try:
                 tg = await get_client()
-                topic_msg = await tg.get_messages(GROUP_ID, ids=int(row['topic_id']))
-                if not topic_msg or isinstance(topic_msg, types.MessageEmpty):
-                    raise ValueError("Topic deleted")
-                return dict(row)
-            except Exception:
-                print(f"🔍 [РЕВИЗИЯ] Тема {row['topic_id']} не найдена в TG. Чищу базу.")
+                # Пытаемся получить сервисное сообщение темы
+                res = await tg.get_messages(GROUP_ID, ids=int(row['topic_id']))
+                if res and not isinstance(res, types.MessageEmpty):
+                    return dict(row)
+                else: raise ValueError("Topic not found in TG")
+            except Exception as e:
+                print(f"🔍 [РЕВИЗИЯ] Удаление битой темы {row['topic_id']}: {e}")
                 await db.execute("DELETE FROM client_topics WHERE client_id = ?", (str(row['client_id']),))
                 await db.commit()
                 return None
@@ -120,57 +122,63 @@ async def start_listener():
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute("DELETE FROM client_topics WHERE topic_id = ?", (t_id,))
                 await db.commit()
+                print(f"🗑️ Тема {t_id} удалена из БД по событию TG")
 
     @tg.on(events.NewMessage())
     async def handler(event):
-        if event.out: return
+        if event.out and not event.is_group: return # Игнорируем свои исходящие в личке
 
         sender = await event.get_sender()
         s_id = str(event.sender_id)
         raw_text = (event.raw_text or "").strip()
 
-        # 1. ГРУППА (МЕНЕДЖЕР)
+        # 1. ГРУППА (МЕНЕДЖЕР -> КЛИЕНТУ)
         if event.is_group:
             s_phone = str(getattr(sender, 'phone', '') or '').lstrip('+').strip()
-            if s_phone in MANAGERS:
-                # ВОТ ОНА: Проверка на маску #номер/имя
-                if raw_text.startswith('#'):
-                    match = re.search(r'#(\d+)/(.*)', raw_text, re.DOTALL)
-                    if not match:
-                        await event.reply("❌ Формат: #номер/имя")
-                        return
-                    t_phone, c_name_input = match.group(1).strip(), match.group(2).strip()
-                    try:
-                        ent = await tg.get_entity(t_phone)
-                        res = await tg(functions.messages.CreateForumTopicRequest(peer=GROUP_ID, title=f"{c_name_input} {t_phone}"))
-                        topic_id = next((u.id for u in res.updates if hasattr(u, 'id')), None)
-                        if topic_id:
-                            async with aiosqlite.connect(DB_PATH) as db:
-                                await db.execute("INSERT OR REPLACE INTO client_topics (client_id, topic_id, client_name, phone, manager_ref) VALUES (?, ?, ?, ?, ?)",
-                                               (str(ent.id), topic_id, c_name_input, t_phone, s_phone))
-                                await db.commit()
-                            await event.reply(f"✅ Тема создана.")
-                    except Exception as e: await event.reply(f"❌ Ошибка: {str(e)}")
+            
+            # Создание темы
+            if raw_text.startswith('#'):
+                match = re.search(r'#(\d+)/(.*)', raw_text, re.DOTALL)
+                if not match:
+                    await event.reply("❌ Неверный формат!\nПример: `#79876543210/Иванов Иван`")
                     return
+                t_phone, c_name_input = match.group(1).strip(), match.group(2).strip()
+                try:
+                    ent = await tg.get_entity(t_phone)
+                    res = await tg(functions.messages.CreateForumTopicRequest(peer=GROUP_ID, title=f"{c_name_input} {t_phone}"))
+                    topic_id = next((u.id for u in res.updates if hasattr(u, 'id')), None)
+                    if topic_id:
+                        async with aiosqlite.connect(DB_PATH) as db:
+                            await db.execute("INSERT OR REPLACE INTO client_topics (client_id, topic_id, client_name, phone, manager_ref) VALUES (?, ?, ?, ?, ?)",
+                                           (str(ent.id), topic_id, c_name_input, t_phone, s_phone))
+                            await db.commit()
+                        await event.reply(f"✅ Тема создана для {t_phone}")
+                except Exception as e: await event.reply(f"❌ Ошибка: {str(e)}")
+                return
 
-                # Ответ в существующую тему
-                if event.reply_to_msg_id:
-                    async with aiosqlite.connect(DB_PATH) as db:
-                        db.row_factory = aiosqlite.Row
-                        async with db.execute("SELECT * FROM client_topics WHERE topic_id = ?", (event.reply_to_msg_id,)) as c:
-                            row = await c.fetchone()
-                    if row:
+            # Пересылка из темы клиенту
+            if event.reply_to_msg_id:
+                async with aiosqlite.connect(DB_PATH) as db:
+                    db.row_factory = aiosqlite.Row
+                    async with db.execute("SELECT * FROM client_topics WHERE topic_id = ?", (event.reply_to_msg_id,)) as c:
+                        row = await c.fetchone()
+                
+                if row:
+                    try:
                         target_id = int(row['client_id'])
+                        target_ent = await tg.get_entity(target_id) # Обязательно для access_hash
                         f_url = await save_tg_media(event)
-                        try:
-                            if event.message.media: sent = await tg.send_file(target_id, event.message.media, caption=raw_text)
-                            else: sent = await tg.send_message(target_id, raw_text)
-                            m_fio = MANAGERS.get(s_phone, s_phone)
-                            await log_to_db(source="Manager", phone=row['phone'], c_name=row['client_name'], text=raw_text, c_id=str(target_id), manager_fio=m_fio, s_number=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
-                        except: pass
+                        
+                        if event.message.media: sent = await tg.send_file(target_ent, event.message.media, caption=raw_text)
+                        else: sent = await tg.send_message(target_ent, raw_text)
+                        
+                        m_fio = MANAGERS.get(s_phone, s_phone)
+                        await log_to_db(source="Manager", phone=row['phone'], c_name=row['client_name'], text=raw_text, c_id=str(target_id), manager_fio=m_fio, s_number=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
+                        print(f"➡️ [OUT] Из темы в личку клиенту {target_id}")
+                    except Exception as e: print(f"❌ Ошибка OUT: {e}")
             return
 
-        # 2. ЛИЧКА (КЛИЕНТ)
+        # 2. ЛИЧКА (КЛИЕНТ -> В ТЕМУ)
         if event.is_private:
             f_url = await save_tg_media(event)
             s_phone = str(getattr(sender, 'phone', '') or '').lstrip('+').strip()
@@ -179,17 +187,18 @@ async def start_listener():
             row = await get_topic_info_with_retry(s_id)
             if row:
                 msg_source = "Manager"; m_fio = MANAGERS.get(row['manager_ref'], ""); m_phone = row['manager_ref']
-            else:
-                msg_source = "1C"; m_fio = await find_last_outbound_manager(s_id); m_phone = ""
-            
-            await log_to_db(source=msg_source, phone=s_phone, text=raw_text, c_name=s_full_name, c_id=s_id, manager_fio=m_fio, s_number=m_phone, f_url=f_url, direction="in", tg_id=event.message.id)
-            
-            if row:
                 try:
                     if event.message.media: await tg.send_file(GROUP_ID, event.message.media, caption=f"📎 {raw_text}", reply_to=row['topic_id'])
                     elif raw_text: await tg.send_message(GROUP_ID, f"💬 {raw_text}", reply_to=row['topic_id'])
-                except: pass
+                    print(f"⬅️ [IN] Из лички в тему {row['topic_id']}")
+                except Exception as e: print(f"❌ Ошибка IN в тему: {e}")
+            else:
+                msg_source = "1C"; m_fio = await find_last_outbound_manager(s_id); m_phone = ""
+                print(f"⬅️ [IN] Темы нет, менеджер из истории: {m_fio}")
+            
+            await log_to_db(source=msg_source, phone=s_phone, text=raw_text, c_name=s_full_name, c_id=s_id, manager_fio=m_fio, s_number=m_phone, f_url=f_url, direction="in", tg_id=event.message.id)
 
+# --- API ROUTES ---
 @app.route('/send', methods=['POST'])
 async def send_text():
     data = await request.get_json()
@@ -200,8 +209,9 @@ async def send_text():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("DELETE FROM client_topics WHERE client_id = ?", (str(ent.id),))
             await db.commit()
-        sent = await tg.send_message(ent.id, text)
+        sent = await tg.send_message(ent, text)
         await log_to_db(source="1C", phone=phone, c_name=f"{ent.first_name or ''}", text=text, c_id=str(ent.id), manager_fio=mgr_fio, direction="out", tg_id=sent.id)
+        print(f"🚀 [API] Текст отправлен клиенту {ent.id}")
         return jsonify({"status": "ok"}), 200
     except Exception as e: return jsonify({"error": str(e)}), 500
 
@@ -215,8 +225,9 @@ async def send_file():
         async with aiosqlite.connect(DB_PATH) as db:
             await db.execute("DELETE FROM client_topics WHERE client_id = ?", (str(ent.id),))
             await db.commit()
-        sent = await tg.send_file(ent.id, f_url, caption=text)
+        sent = await tg.send_file(ent, f_url, caption=text)
         await log_to_db(source="1C", phone=phone, c_name=f"{ent.first_name or ''}", text=text, c_id=str(ent.id), manager_fio=mgr_fio, f_url=f_url, direction="out", tg_id=sent.id)
+        print(f"🚀 [API] Файл отправлен клиенту {ent.id}")
         return jsonify({"status": "ok"}), 200
     except Exception as e: return jsonify({"error": str(e)}), 500
 
@@ -227,7 +238,8 @@ async def fetch_new():
         async with db.execute("SELECT * FROM outbound_logs WHERE status = 'pending'") as c:
             rows = [dict(r) for r in await c.fetchall()]
         if rows:
-            await db.execute(f"UPDATE outbound_logs SET status='ok' WHERE id IN ({','.join(['?']*len(rows))})", [r['id'] for r in rows])
+            ids = [r['id'] for r in rows]
+            await db.execute(f"UPDATE outbound_logs SET status='ok' WHERE id IN ({','.join(['?']*len(ids))})", ids)
             await db.commit()
         return jsonify(rows)
 
