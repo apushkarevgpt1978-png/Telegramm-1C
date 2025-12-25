@@ -41,7 +41,8 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS client_topics (
                 client_id TEXT PRIMARY KEY,
                 topic_id INTEGER,
-                client_name TEXT
+                client_name TEXT,
+                phone TEXT
             )
         """)
         await db.commit()
@@ -114,30 +115,26 @@ async def start_listener():
                         display_title = f"{target_phone} {content}"
                         result = await tg(functions.messages.CreateForumTopicRequest(peer=GROUP_ID, title=display_title))
                         topic_id = next((u.id for u in result.updates if hasattr(u, 'id')), None)
-                        
                         if topic_id:
                             async with aiosqlite.connect(DB_PATH) as db:
-                                await db.execute("INSERT OR REPLACE INTO client_topics (client_id, topic_id, client_name) VALUES (?, ?, ?)",
-                                               (c_id, topic_id, content))
+                                await db.execute("INSERT OR REPLACE INTO client_topics (client_id, topic_id, client_name, phone) VALUES (?, ?, ?, ?)",
+                                               (c_id, topic_id, content, target_phone))
                                 await db.commit()
-                            await event.reply(f"✅ Диалог создан! ID: {topic_id}. Теперь сообщения будут приходить в отдельную ветку.")
+                            await event.reply(f"✅ Диалог создан! ID: {topic_id}.")
                     else:
                         try:
                             f_url = await save_tg_media(event)
                             sent = await (tg.send_file(ent.id, os.path.join(FILES_DIR, f_url.split('/')[-1]), caption=content) if f_url else tg.send_message(ent.id, content))
                             await log_to_db(source="Manager", phone=target_phone, text=content, c_id=c_id, manager=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
-                            
                             try:
                                 await tg.send_message(GROUP_ID, f"📤 Мой ответ: {content}", reply_to=topic_id)
                                 await event.reply("✅ Отправлено и добавлено в диалог")
                             except Exception as topic_e:
                                 if "reply_to_msg_id_invalid" in str(topic_e).lower() or "deleted" in str(topic_e).lower():
                                     await delete_broken_topic(topic_id)
-                                    await event.reply("⚠️ Тема была удалена в Telegram. База очищена. Повторите маску для создания новой темы.")
-                                else:
-                                    await event.reply(f"✅ Отправлено клиенту, но не добавлено в группу (Ошибка: {topic_e})")
-                        except Exception as inner_e:
-                            await event.reply(f"❌ Ошибка отправки: {str(inner_e)}")
+                                    await event.reply("⚠️ Тема была удалена. База очищена. Повторите маску.")
+                                else: await event.reply(f"✅ Отправлено клиенту (Ошибка темы: {topic_e})")
+                        except Exception as inner_e: await event.reply(f"❌ Ошибка отправки: {str(inner_e)}")
                 except Exception as e:
                     if "entity" in str(e).lower(): await event.reply("❌ Пользователь не найден")
                     else: await event.reply(f"❌ Ошибка: {str(e)}")
@@ -146,31 +143,28 @@ async def start_listener():
             if event.is_group and event.reply_to:
                 async with aiosqlite.connect(DB_PATH) as db:
                     db.row_factory = aiosqlite.Row
-                    async with db.execute("SELECT client_id FROM client_topics WHERE topic_id = ?", (event.reply_to_msg_id,)) as c:
+                    async with db.execute("SELECT client_id, phone FROM client_topics WHERE topic_id = ?", (event.reply_to_msg_id,)) as c:
                         row = await c.fetchone()
                         if row:
                             target_id = int(row['client_id'])
+                            t_phone = row['phone']
                             sent = await tg.send_message(target_id, raw_text)
-                            await log_to_db(source="Manager", phone="", text=raw_text, c_id=str(target_id), manager=s_phone, direction="out", tg_id=sent.id)
+                            await log_to_db(source="Manager", phone=t_phone, text=raw_text, c_id=str(target_id), manager=s_phone, direction="out", tg_id=sent.id)
 
         # --- 2. ЛОГИКА КЛИЕНТА (Входящие) ---
         elif event.is_private:
             f_url = await save_tg_media(event)
             s_full_name = f"{getattr(sender, 'first_name', '') or ''} {getattr(sender, 'last_name', '') or ''}".strip() or "Unknown"
             await log_to_db(source="Client", phone=s_phone, text=raw_text or "[Файл]", c_name=s_full_name, c_id=s_id, f_url=f_url, direction="in", tg_id=event.message.id)
-            
             topic_id = await get_topic_from_db(s_id)
             if topic_id:
                 try:
-                    # Если есть файл, отправляем его вместе с текстом (caption)
                     if event.message.media:
                         await tg.send_file(GROUP_ID, event.message.media, caption=f"📎 Файл от клиента: {raw_text or ''}", reply_to=topic_id)
                     else:
-                        # Если только текст
                         await tg.send_message(GROUP_ID, f"💬 {raw_text}", reply_to=topic_id)
                 except Exception as e:
-                    if "reply_to_msg_id_invalid" in str(e).lower(): 
-                        await delete_broken_topic(topic_id)
+                    if "reply_to_msg_id_invalid" in str(e).lower(): await delete_broken_topic(topic_id)
 
     # --- 3. ЛОГИКА УДАЛЕНИЯ ТЕМЫ ---
     @tg.on(events.ChatAction)
@@ -230,8 +224,7 @@ async def fetch_new():
         return jsonify(rows)
 
 @app.route('/get_file/<filename>')
-async def get_file(filename): 
-    return await send_from_directory(FILES_DIR, filename)
+async def get_file(filename): return await send_from_directory(FILES_DIR, filename)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
