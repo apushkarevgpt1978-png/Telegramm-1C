@@ -165,5 +165,19 @@ async def fetch_new():
 async def get_file(filename): 
     return await send_from_directory(FILES_DIR, filename)
 
+@app.before_serving
+async def startup():
+    await init_db()
+    # Запускаем слушатель Telegram как отдельную задачу
+    asyncio.create_task(start_listener())
+    print("🚀 ГЕНА ЗАПУЩЕН И ГОТОВ ПРИНИМАТЬ ЗАПРОСЫ ОТ 1С")
+
+# Добавим обработчик, который будет печатать в лог любой чих
+@app.after_request
+async def log_request(response):
+    print(f"📥 ЗАПРОС: {request.method} {request.path} - СТАТУС: {response.status_code}")
+    return response
+
+# Вместо app.run используем встроенный механизм для Docker
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000)
+    app.run(host='0.0.0.0', port=5000, debug=False)
