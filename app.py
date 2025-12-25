@@ -1,7 +1,7 @@
 import os, asyncio, aiosqlite, re, uuid
 from datetime import datetime
 from quart import Quart, request, jsonify, send_from_directory
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, functions
 
 app = Quart(__name__)
 
@@ -160,6 +160,21 @@ async def fetch_new():
 @app.route('/get_file/<filename>')
 async def get_file(filename): 
     return await send_from_directory(FILES_DIR, filename)
+
+@app.route('/create_test_topic')
+async def create_test_topic():
+    tg = await get_client()
+    try:
+        # Пытаемся создать тему с названием "Тестовая тема Гены"
+        result = await tg(functions.channels.CreateForumTopicRequest(
+            channel=GROUP_ID,
+            title="Тестовая тема Гены"
+        ))
+        # Получаем ID созданной темы
+        topic_id = result.updates[0].id 
+        return f"✅ Тема создана! ID темы: {topic_id}"
+    except Exception as e:
+        return f"❌ Ошибка: {str(e)}"
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
