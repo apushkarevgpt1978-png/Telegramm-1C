@@ -75,35 +75,49 @@ async def start_listener():
     
     @tg.on(events.NewMessage())
     async def handler(event):
+        # ЭТО ПОКАЖЕТ В ЛОГАХ ПРИШЛО ЛИ СООБЩЕНИЕ
+        print(f"DEBUG: Получено сообщение от {event.sender_id} в чате {event.chat_id}")
+        
         # --- 1. ВХОДЯЩЕЕ ОТ КЛИЕНТА (В ЛИЧКУ БОТУ) ---
         if event.is_private:
             sender = await event.get_sender()
             s_phone = str(getattr(sender, 'phone', '') or '').lstrip('+').strip()
-            if s_phone in managers_list: return # Игнорим личку менеджера, он пишет в группе
+            
+            # Если пишет менеджер в личку - просто логируем и выходим
+            if s_phone in managers_list: 
+                print(f"DEBUG: Менеджер {s_phone} написал в личку, игнорим.")
+                return 
 
             s_id = str(event.sender_id)
             s_full_name = f"{getattr(sender, 'first_name', '') or ''} {getattr(sender, 'last_name', '') or ''}".strip() or "Unknown"
             raw_text = (event.raw_text or "").strip()
+            print(f"DEBUG: Входящее от клиента {s_phone}: {raw_text}")
+            
             f_url = await save_tg_media(event)
 
-            # Ищем или создаем ТЕМУ в группе
             async with aiosqlite.connect(DB_PATH) as db:
                 async with db.execute('SELECT topic_id FROM topics WHERE phone=?', (s_phone,)) as cursor:
                     row = await cursor.fetchone()
-                    if row: topic_id = row[0]
+                    if row: 
+                        topic_id = row[0]
                     else:
+                        print(f"DEBUG: Создаю тему для {s_phone}")
                         try:
                             res = await tg(functions.channels.CreateForumTopicRequest(channel=GROUP_ID, title=f"{s_full_name} ({s_phone})"))
                             topic_id = res.updates[0].id
                             await db.execute('INSERT INTO topics (topic_id, phone) VALUES (?, ?)', (topic_id, s_phone))
                             await db.commit()
-                        except: topic_id = None
+                        except Exception as e:
+                            print(f"DEBUG: Ошибка создания темы: {e}")
+                            topic_id = None
 
-            # Пересылаем в группу в нужную тему
-            msg_to_group = f"**{s_full_name}** ({s_phone}):\n{raw_text}"
-            await tg.send_message(GROUP_ID, msg_to_group, reply_to=topic_id)
+            await tg.send_message(GROUP_ID, f"**{s_full_name}** ({s_phone}):\n{raw_text}", reply_to=topic_id)
             await log_to_db(source="Client", phone=s_phone, text=raw_text, c_name=s_full_name, c_id=s_id, f_url=f_url, direction="in", tg_id=event.message.id)
 
+        # --- 2. СООБЩЕНИЕ ИЗ ГРУППЫ (ОТ МЕНЕДЖЕРА) ---
+        elif event.chat_id == GROUP_ID:
+            print(f"DEBUG: Сообщение в группе от менеджера")
+            if event.out: return
         # --- 2. СООБЩЕНИЕ ИЗ ГРУППЫ (ОТ МЕНЕДЖЕРА) ---
         elif event.chat_id == GROUP_ID:
             if event.out: return # Игнорим свои сообщения
