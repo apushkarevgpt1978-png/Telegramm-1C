@@ -5,7 +5,7 @@ from telethon import TelegramClient, events, functions, types
 
 app = Quart(__name__)
 
-# --- CONFIGURATION ---
+# --- CONFIG ---
 API_ID = int(os.environ.get('API_ID', 0))
 API_HASH = os.environ.get('API_HASH', '')
 SESSION_PATH = os.environ.get('TG_SESSION_PATH', '/app/data/GenaAPI')
@@ -14,7 +14,6 @@ FILES_DIR = '/app/files'
 BASE_URL = os.environ.get('BASE_URL', 'http://192.168.121.99:5000')
 GROUP_ID = -1003599844429
 
-# Managers Dictionary Parsing (phone:Name,phone:Name)
 mgr_raw = os.environ.get('MANAGERS_PHONES', '')
 MANAGERS = {}
 if mgr_raw:
@@ -53,7 +52,6 @@ async def init_db():
         """)
         await db.commit()
 
-# --- DATABASE HELPERS ---
 async def log_to_db(source, phone, text, c_name=None, c_id=None, manager_fio=None, s_number=None, f_url=None, direction='in', tg_id=None):
     created_at = datetime.now()
     try:
@@ -77,6 +75,7 @@ async def find_last_manager_in_history(c_id):
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
+            # Берем только имя, игнорируя source из истории
             async with db.execute("SELECT manager FROM outbound_logs WHERE client_id = ? AND manager != '' ORDER BY created_at DESC LIMIT 1", (str(c_id),)) as cursor:
                 row = await cursor.fetchone()
                 return row['manager'] if row else ""
@@ -94,7 +93,6 @@ async def save_tg_media(event):
         return f"{BASE_URL}/get_file/{filename}"
     return None
 
-# --- TELEGRAM EVENT LISTENER ---
 async def start_listener():
     tg = await get_client()
 
@@ -113,9 +111,8 @@ async def start_listener():
         s_id = str(event.sender_id)
         raw_text = (event.raw_text or "").strip()
 
-        # A. MANAGER INTERACTION
+        # 1. МЕНЕДЖЕР
         if s_phone in MANAGERS:
-            # Mask handler #phone/name
             if raw_text.startswith('#'):
                 match = re.search(r'#(\d+)/(.*)', raw_text, re.DOTALL)
                 if not match: return
@@ -129,14 +126,15 @@ async def start_listener():
                             await db.execute("INSERT OR REPLACE INTO client_topics (client_id, topic_id, client_name, phone, manager_ref) VALUES (?, ?, ?, ?, ?)",
                                            (str(ent.id), topic_id, c_name_input, t_phone, s_phone))
                             await db.commit()
-                        await event.reply(f"✅ Тема создана: {c_name_input}")
+                        await event.reply(f"✅ Тема создана.")
                 except Exception as e: await event.reply(f"❌ Ошибка: {str(e)}")
                 return
 
-            # Reply from Topic
             if event.is_group and event.reply_to_msg_id:
                 row = await get_topic_info(event.reply_to_msg_id, by_topic=True)
-                msg_source = "Manager" if row else "1C" # If topic deleted, it's 1C source
+                
+                # FIX: Если записи в client_topics нет, значит тема удалена -> ставим 1C
+                current_source = "Manager" if row else "1C"
                 
                 if row:
                     target_id = int(row['client_id'])
@@ -145,25 +143,25 @@ async def start_listener():
                         if event.message.media: sent = await tg.send_file(target_id, event.message.media, caption=raw_text)
                         elif raw_text: sent = await tg.send_message(target_id, raw_text)
                         else: return
-                        
                         m_fio = MANAGERS.get(s_phone, s_phone)
-                        await log_to_db(source=msg_source, phone=row['phone'], c_name=row['client_name'], text=raw_text, c_id=str(target_id), manager_fio=m_fio, s_number=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
-                    except Exception as e: print(f"🔴 Send Error: {e}")
+                        await log_to_db(source=current_source, phone=row['phone'], c_name=row['client_name'], text=raw_text, c_id=str(target_id), manager_fio=m_fio, s_number=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
+                    except: pass
 
-        # B. CLIENT INTERACTION (Inbound)
+        # 2. КЛИЕНТ (ВХОДЯЩИЕ)
         elif event.is_private:
             f_url = await save_tg_media(event)
             s_full_name = f"{getattr(sender, 'first_name', '') or ''} {getattr(sender, 'last_name', '') or ''}".strip() or "Client"
             row = await get_topic_info(s_id)
             
+            # FIX: Логика источника теперь изолирована от истории
             if row:
                 msg_source = "Manager"
+                m_fio = MANAGERS.get(row['manager_ref'], "")
                 m_phone = row['manager_ref']
-                m_fio = MANAGERS.get(m_phone, "")
             else:
-                msg_source = "1C"
-                m_phone = ""
+                msg_source = "1C" # Темы нет в базе -> источник только 1C
                 m_fio = await find_last_manager_in_history(s_id)
+                m_phone = ""
             
             await log_to_db(source=msg_source, phone=s_phone, text=raw_text, c_name=s_full_name, c_id=s_id, manager_fio=m_fio, s_number=m_phone, f_url=f_url, direction="in", tg_id=event.message.id)
             
@@ -173,7 +171,6 @@ async def start_listener():
                     elif raw_text: await tg.send_message(GROUP_ID, f"💬 {raw_text}", reply_to=row['topic_id'])
                 except: pass
 
-# --- API ROUTES (1C) ---
 @app.route('/send', methods=['POST'])
 async def send_text():
     data = await request.get_json()
@@ -181,13 +178,8 @@ async def send_text():
     tg = await get_client()
     try:
         ent = await tg.get_entity(phone)
-        c_name = f"{getattr(ent, 'first_name', '') or ''} {getattr(ent, 'last_name', '') or ''}".strip() or "Client"
         sent = await tg.send_message(ent.id, text)
-        await log_to_db(source="1C", phone=phone, c_name=c_name, text=text, c_id=str(ent.id), manager_fio=mgr_fio, s_number="", direction="out", tg_id=sent.id)
-        row = await get_topic_info(ent.id)
-        if row:
-            try: await tg.send_message(GROUP_ID, f"🤖 1C: {text}", reply_to=row['topic_id'])
-            except: pass
+        await log_to_db(source="1C", phone=phone, c_name=f"{ent.first_name or ''} {ent.last_name or ''}", text=text, c_id=str(ent.id), manager_fio=mgr_fio, direction="out", tg_id=sent.id)
         return jsonify({"status": "ok"}), 200
     except Exception as e: return jsonify({"error": str(e)}), 500
 
@@ -198,25 +190,19 @@ async def send_file():
     tg = await get_client()
     try:
         ent = await tg.get_entity(phone)
-        c_name = f"{getattr(ent, 'first_name', '') or ''} {getattr(ent, 'last_name', '') or ''}".strip() or "Client"
         sent = await tg.send_file(ent.id, f_url, caption=text)
-        await log_to_db(source="1C", phone=phone, c_name=c_name, text=text, c_id=str(ent.id), manager_fio=mgr_fio, s_number="", f_url=f_url, direction="out", tg_id=sent.id)
-        row = await get_topic_info(ent.id)
-        if row:
-            try: await tg.send_file(GROUP_ID, f_url, caption=f"🤖 1C Файл: {text}", reply_to=row['topic_id'])
-            except: pass
+        await log_to_db(source="1C", phone=phone, c_name=f"{ent.first_name or ''} {ent.last_name or ''}", text=text, c_id=str(ent.id), manager_fio=mgr_fio, f_url=f_url, direction="out", tg_id=sent.id)
         return jsonify({"status": "ok"}), 200
     except Exception as e: return jsonify({"error": str(e)}), 500
 
 @app.route('/fetch_new', methods=['GET', 'POST'])
 async def fetch_new():
-    async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+    async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT * FROM outbound_logs WHERE status = 'pending'") as c:
             rows = [dict(r) for r in await c.fetchall()]
         if rows:
-            ids = [r['id'] for r in rows]
-            await db.execute(f"UPDATE outbound_logs SET status='ok' WHERE id IN ({','.join(['?']*len(ids))})", ids)
+            await db.execute(f"UPDATE outbound_logs SET status='ok' WHERE id IN ({','.join(['?']*len(rows))})", [r['id'] for r in rows])
             await db.commit()
         return jsonify(rows)
 
