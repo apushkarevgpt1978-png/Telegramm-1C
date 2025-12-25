@@ -92,7 +92,6 @@ async def start_listener():
 
         # --- 1. ЛОГИКА МЕНЕДЖЕРА ---
         if s_phone in managers_list:
-            # А) Создание диалога или отправка по маске #номер/ТекстИлиИмя
             if raw_text.startswith('#'):
                 match = re.search(r'#(\d+)/(.*)', raw_text, re.DOTALL)
                 if not match:
@@ -101,15 +100,11 @@ async def start_listener():
                 
                 target_phone, content = match.group(1).strip(), match.group(2).strip()
                 try:
-                    # Поиск клиента в ТГ
                     ent = await tg.get_entity(target_phone)
                     c_id = str(ent.id)
-                    
-                    # Проверяем, есть ли уже диалог в базе
                     topic_id = await get_topic_from_db(c_id)
                     
                     if not topic_id:
-                        # Если диалога нет — СОЗДАЕМ
                         display_title = f"{target_phone} {content}"
                         result = await tg(functions.messages.CreateForumTopicRequest(peer=GROUP_ID, title=display_title))
                         topic_id = next((u.id for u in result.updates if hasattr(u, 'id')), None)
@@ -121,22 +116,16 @@ async def start_listener():
                                 await db.commit()
                             await event.reply(f"✅ Диалог создан! ID: {topic_id}. Теперь сообщения будут приходить в отдельную ветку.")
                     else:
-                        # Если диалог УЖЕ ЕСТЬ — просто отправляем сообщение клиенту
                         f_url = await save_tg_media(event)
                         sent = await (tg.send_file(ent.id, os.path.join(FILES_DIR, f_url.split('/')[-1]), caption=content) if f_url else tg.send_message(ent.id, content))
-                        
-                        # Записываем в базу и ДУБЛИРУЕМ в тему для истории
                         await log_to_db(source="Manager", phone=target_phone, text=content, c_id=c_id, manager=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
                         await tg.send_message(GROUP_ID, f"📤 Мой ответ: {content}", reply_to=topic_id)
                         await event.reply("✅ Отправлено и добавлено в диалог")
-
                 except Exception as e:
                     await event.reply(f"❌ Ошибка: {str(e)}")
                 return
 
-            # Б) Ответ менеджера внутри темы клиенту
             if event.is_group and event.reply_to:
-                # Ищем, какому клиенту принадлежит эта тема
                 async with aiosqlite.connect(DB_PATH) as db:
                     db.row_factory = aiosqlite.Row
                     async with db.execute("SELECT client_id FROM client_topics WHERE topic_id = ?", (event.reply_to_msg_id,)) as c:
@@ -150,35 +139,25 @@ async def start_listener():
         elif event.is_private:
             f_url = await save_tg_media(event)
             s_full_name = f"{getattr(sender, 'first_name', '') or ''} {getattr(sender, 'last_name', '') or ''}".strip() or "Unknown"
-            
-            # Пишем в базу для 1С
             await log_to_db(source="Client", phone=s_phone, text=raw_text or "[Файл]", c_name=s_full_name, c_id=s_id, f_url=f_url, direction="in", tg_id=event.message.id)
             
-                # Если есть тема - пересылаем менеджеру
-                topic_id = await get_topic_from_db(s_id)
-                if topic_id:
-                    await tg.send_message(GROUP_ID, f"💬 {raw_text}" if not f_url else f"📎 Файл: {raw_text}", reply_to=topic_id)
-    
-        # --- ЛОГИКА УДАЛЕНИЯ ТЕМЫ ---
-        @tg.on(events.ChatAction)
-        async def action_handler(event):
-            # Проверяем, что это удаление темы (ветки форума)
-            if event.is_group and event.action_message and hasattr(event.action_message.action, 'topic'):
-                # В некоторых версиях Telethon удаление темы ловится через DeletedMessages или специфические Action
-                # Но самый надежный способ для форума — это ловить удаление через action
-                try:
-                    # Если событие — удаление темы
-                    if isinstance(event.action_message.action, types.MessageActionTopicDelete):
-                        # Нам нужно понять, какая тема удалена. К сожалению, API не всегда отдает ID в action.
-                        # Поэтому мы проверяем id сообщения, которое было "головой" темы
-                        deleted_topic_id = event.action_message.reply_to_msg_id
-                        
-                        async with aiosqlite.connect(DB_PATH) as db:
-                            await db.execute("DELETE FROM client_topics WHERE topic_id = ?", (deleted_topic_id,))
-                            await db.commit()
-                        print(f"🗑️ Тема {deleted_topic_id} удалена из базы, так как она удалена в Telegram.")
-                except Exception as e:
-                    print(f"⚠️ Ошибка при очистке базы после удаления темы: {e}")
+            topic_id = await get_topic_from_db(s_id)
+            if topic_id:
+                await tg.send_message(GROUP_ID, f"💬 {raw_text}" if not f_url else f"📎 Файл: {raw_text}", reply_to=topic_id)
+
+    # --- 3. ЛОГИКА УДАЛЕНИЯ ТЕМЫ (отдельный обработчик) ---
+    @tg.on(events.ChatAction)
+    async def action_handler(event):
+        if event.is_group and event.action_message:
+            try:
+                if isinstance(event.action_message.action, types.MessageActionTopicDelete):
+                    deleted_topic_id = event.action_message.reply_to_msg_id
+                    async with aiosqlite.connect(DB_PATH) as db:
+                        await db.execute("DELETE FROM client_topics WHERE topic_id = ?", (deleted_topic_id,))
+                        await db.commit()
+                    print(f"🗑️ Тема {deleted_topic_id} удалена из базы.")
+            except Exception as e:
+                print(f"⚠️ Ошибка при удалении темы: {e}")
 
 @app.before_serving
 async def startup():
@@ -195,11 +174,8 @@ async def send_text():
         ent = await tg.get_entity(phone)
         sent = await tg.send_message(ent.id, text)
         await log_to_db(source="1C", phone=phone, text=text, c_id=str(ent.id), manager=mgr, direction="out", tg_id=sent.id)
-        
-        # Дублируем в тему, если она есть
         t_id = await get_topic_from_db(ent.id)
         if t_id: await tg.send_message(GROUP_ID, f"🤖 (Из 1С): {text}", reply_to=t_id)
-        
         return jsonify({"status": "ok"}), 200
     except Exception as e: return jsonify({"error": str(e)}), 500
 
@@ -213,10 +189,8 @@ async def send_file():
         ent = await tg.get_entity(phone)
         sent = await tg.send_file(ent.id, f_url, caption=text)
         await log_to_db(source="1C", phone=phone, text=text, c_id=str(ent.id), manager=mgr, f_url=f_url, direction="out", tg_id=sent.id)
-        
         t_id = await get_topic_from_db(ent.id)
         if t_id: await tg.send_message(GROUP_ID, f"🤖 (Из 1С прислан файл): {text}", reply_to=t_id)
-        
         return jsonify({"status": "ok"}), 200
     except Exception as e: return jsonify({"error": str(e)}), 500
 
