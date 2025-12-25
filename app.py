@@ -122,21 +122,27 @@ async def start_listener():
                                 await db.commit()
                             await event.reply(f"✅ Диалог создан! ID: {topic_id}. Теперь сообщения будут приходить в отдельную ветку.")
                     else:
+                        # Если диалог УЖЕ ЕСТЬ — просто отправляем сообщение клиенту
                         try:
                             f_url = await save_tg_media(event)
                             sent = await (tg.send_file(ent.id, os.path.join(FILES_DIR, f_url.split('/')[-1]), caption=content) if f_url else tg.send_message(ent.id, content))
+                            
+                            # Записываем в базу
                             await log_to_db(source="Manager", phone=target_phone, text=content, c_id=c_id, manager=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
-                            await tg.send_message(GROUP_ID, f"📤 Мой ответ: {content}", reply_to=topic_id)
-                            await event.reply("✅ Отправлено и добавлено в диалог")
-                        except Exception as inner_e:
-                            if "reply_to_msg_id_invalid" in str(inner_e).lower():
-                                await delete_broken_topic(topic_id)
-                                await event.reply("⚠️ Старый диалог был удален в Telegram. Попробуйте еще раз, чтобы я создал новый.")
-                            else: raise inner_e
-                except Exception as e:
-                    if "entity" in str(e).lower(): await event.reply("❌ Пользователь не найден")
-                    else: await event.reply(f"❌ Ошибка: {str(e)}")
-                return
+                            
+                            # Пытаемся дублировать в тему
+                            try:
+                                await tg.send_message(GROUP_ID, f"📤 Мой ответ: {content}", reply_to=topic_id)
+                                await event.reply("✅ Отправлено и добавлено в диалог")
+                            except Exception as topic_e:
+                                if "reply_to_msg_id_invalid" in str(topic_e).lower() or "deleted" in str(topic_e).lower():
+                                    await delete_broken_topic(topic_id)
+                                    await event.reply("⚠️ Тема была удалена в Telegram. Я очистил базу. Отправьте сообщение еще раз, чтобы я создал новый диалог.")
+                                else:
+                                    await event.reply(f"✅ Отправлено клиенту, но не добавлено в группу (Ошибка темы: {topic_e})")
+                                    
+                        except Exception as e:
+                            await event.reply(f"❌ Ошибка отправки клиенту: {str(e)}")
 
             if event.is_group and event.reply_to:
                 async with aiosqlite.connect(DB_PATH) as db:
