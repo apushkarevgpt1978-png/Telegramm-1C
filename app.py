@@ -11,7 +11,7 @@ API_HASH = os.environ.get('API_HASH', '')
 SESSION_PATH = os.environ.get('TG_SESSION_PATH', '/app/data/GenaAPI')
 DB_PATH = os.environ.get('DB_PATH', '/app/data/gateway_messages.db')
 
-# Разбор словаря менеджеров из Portainer (79153019495:Андрей,...)
+# Словарь менеджеров из Portainer
 mgr_raw = os.environ.get('MANAGERS_PHONES', '')
 MANAGERS = {}
 if mgr_raw:
@@ -61,7 +61,6 @@ async def init_db():
 async def log_to_db(source, phone, text, c_name=None, c_id=None, manager_fio=None, s_number=None, f_url=None, direction='in', tg_id=None):
     messenger = 'tg'
     created_at = datetime.now()
-    # Приведение к строкам (защита от None)
     s_phone = str(phone) if phone else ""
     s_manager = str(manager_fio) if manager_fio else ""
     s_cid = str(c_id) if c_id else ""
@@ -108,9 +107,9 @@ async def start_listener():
         s_id = str(event.sender_id)
         raw_text = (event.raw_text or "").strip()
 
-        # 1. МЕНЕДЖЕР ПИШЕТ
+        # 1. МЕНЕДЖЕР ПИШЕТ ИЗ ТЕЛЕГРАМ
         if s_phone in MANAGERS:
-            # МАСКА: Только создание темы
+            # МАСКА #номер/имя
             if raw_text.startswith('#'):
                 match = re.search(r'#(\d+)/(.*)', raw_text, re.DOTALL)
                 if not match: return
@@ -127,22 +126,23 @@ async def start_listener():
                                 await db.execute("INSERT OR REPLACE INTO client_topics (client_id, topic_id, client_name, phone, manager_ref) VALUES (?, ?, ?, ?, ?)",
                                                (c_id, topic_id, c_name_input, t_phone, s_phone))
                                 await db.commit()
-                            await event.reply(f"✅ Тема создана. Теперь пишите клиенту в новой ветке.")
+                            await event.reply(f"✅ Тема создана.")
                     else:
                         async with aiosqlite.connect(DB_PATH) as db:
                             await db.execute("UPDATE client_topics SET manager_ref = ? WHERE client_id = ?", (s_phone, c_id))
                             await db.commit()
-                        await event.reply(f"⚠️ Тема уже была. Менеджер {MANAGERS.get(s_phone)} закреплен.")
+                        await event.reply(f"⚠️ Закреплен менеджер {MANAGERS.get(s_phone)}.")
                 except Exception as e: await event.reply(f"❌ Ошибка: {str(e)}")
                 return
 
-            # ОТВЕТ ИЗ ТЕМЫ
+            # ОТВЕТ ИЗ ТЕМЫ (FIX: заполняем phone клиента)
             if event.is_group and event.reply_to:
                 row = await get_topic_info(event.reply_to_msg_id, by_topic=True)
                 if row:
                     target_id = int(row['client_id'])
                     sent = await tg.send_message(target_id, raw_text)
                     m_fio = MANAGERS.get(s_phone, s_phone)
+                    # Используем row['phone'] из базы
                     await log_to_db(source="Manager", phone=row['phone'], c_name=row['client_name'], text=raw_text, c_id=str(target_id), manager_fio=m_fio, s_number=s_phone, direction="out", tg_id=sent.id)
 
         # 2. КЛИЕНТ ПИШЕТ (Входящие)
@@ -150,8 +150,10 @@ async def start_listener():
             f_url = await save_tg_media(event)
             s_full_name = f"{getattr(sender, 'first_name', '') or ''} {getattr(sender, 'last_name', '') or ''}".strip() or "Client"
             row = await get_topic_info(s_id)
+            
+            # FIX: Ищем закрепленного менеджера и его ФИО для входящего
             m_phone = row['manager_ref'] if row else ""
-            m_fio = MANAGERS.get(m_phone, "")
+            m_fio = MANAGERS.get(m_phone, "") if m_phone else ""
             
             await log_to_db(source="Client", phone=s_phone, text=raw_text or "[Медиа]", c_name=s_full_name, c_id=s_id, manager_fio=m_fio, s_number=m_phone, f_url=f_url, direction="in", tg_id=event.message.id)
             
@@ -166,7 +168,7 @@ async def startup():
     await init_db()
     asyncio.create_task(start_listener())
 
-# 3. ЗАПРОСЫ ИЗ 1С
+# 3. ЗАПРОСЫ ИЗ 1С (Без изменений, с вашим client_name из аккаунта)
 @app.route('/send', methods=['POST'])
 async def send_text():
     data = await request.get_json()
@@ -176,9 +178,7 @@ async def send_text():
         ent = await tg.get_entity(phone)
         c_name = f"{getattr(ent, 'first_name', '') or ''} {getattr(ent, 'last_name', '') or ''}".strip() or "Client"
         sent = await tg.send_message(ent.id, text)
-        # phone - из запроса, client_name - из TG, manager - из 1С, sender_number - пусто
         await log_to_db(source="1C", phone=phone, c_name=c_name, text=text, c_id=str(ent.id), manager_fio=mgr_from_1c, s_number="", direction="out", tg_id=sent.id)
-        
         row = await get_topic_info(ent.id)
         if row:
             try: await tg.send_message(GROUP_ID, f"🤖 1C: {text}", reply_to=row['topic_id'])
@@ -196,7 +196,6 @@ async def send_file():
         c_name = f"{getattr(ent, 'first_name', '') or ''} {getattr(ent, 'last_name', '') or ''}".strip() or "Client"
         sent = await tg.send_file(ent.id, f_url, caption=text)
         await log_to_db(source="1C", phone=phone, c_name=c_name, text=text, c_id=str(ent.id), manager_fio=mgr_from_1c, s_number="", f_url=f_url, direction="out", tg_id=sent.id)
-        
         row = await get_topic_info(ent.id)
         if row:
             try: await tg.send_message(GROUP_ID, f"🤖 1C Файл: {text}", reply_to=row['topic_id'])
