@@ -5,12 +5,16 @@ from telethon import TelegramClient, events, functions, types
 
 app = Quart(__name__)
 
-# --- НАСТРОЙКИ ---
+# --- CONFIGURATION ---
 API_ID = int(os.environ.get('API_ID', 0))
 API_HASH = os.environ.get('API_HASH', '')
 SESSION_PATH = os.environ.get('TG_SESSION_PATH', '/app/data/GenaAPI')
 DB_PATH = os.environ.get('DB_PATH', '/app/data/gateway_messages.db')
+FILES_DIR = '/app/files'
+BASE_URL = os.environ.get('BASE_URL', 'http://192.168.121.99:5000')
+GROUP_ID = -1003599844429
 
+# Managers Dictionary Parsing (phone:Name,phone:Name)
 mgr_raw = os.environ.get('MANAGERS_PHONES', '')
 MANAGERS = {}
 if mgr_raw:
@@ -18,12 +22,6 @@ if mgr_raw:
         if ':' in item:
             ph, name = item.split(':', 1)
             MANAGERS[ph.strip().lstrip('+')] = name.strip()
-        else:
-            MANAGERS[item.strip().lstrip('+')] = item.strip()
-
-FILES_DIR = '/app/files'
-BASE_URL = os.environ.get('BASE_URL', 'http://192.168.121.99:5000')
-GROUP_ID = -1003599844429
 
 if not os.path.exists(FILES_DIR): os.makedirs(FILES_DIR)
 
@@ -55,6 +53,7 @@ async def init_db():
         """)
         await db.commit()
 
+# --- DATABASE HELPERS ---
 async def log_to_db(source, phone, text, c_name=None, c_id=None, manager_fio=None, s_number=None, f_url=None, direction='in', tg_id=None):
     created_at = datetime.now()
     try:
@@ -65,7 +64,7 @@ async def log_to_db(source, phone, text, c_name=None, c_id=None, manager_fio=Non
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (source, str(phone or ""), str(c_name or ""), str(c_id or ""), str(manager_fio or ""), str(s_number or ""), 'tg', str(text or ""), f_url, 'pending', direction, tg_id, created_at))
             await db.commit()
-    except Exception as e: print(f"⚠️ ОШИБКА БД: {e}")
+    except Exception as e: print(f"⚠️ DB Error: {e}")
 
 async def get_topic_info(c_id_or_topic_id, by_topic=False):
     async with aiosqlite.connect(DB_PATH) as db:
@@ -74,17 +73,11 @@ async def get_topic_info(c_id_or_topic_id, by_topic=False):
         async with db.execute(query, (str(c_id_or_topic_id),)) as cursor:
             return await cursor.fetchone()
 
-# НОВАЯ ФУНКЦИЯ: Поиск менеджера в истории исходящих
 async def find_last_manager_in_history(c_id):
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
-            # Ищем последнюю запись с заполненным менеджером для этого клиента
-            async with db.execute("""
-                SELECT manager FROM outbound_logs 
-                WHERE client_id = ? AND manager IS NOT NULL AND manager != '' 
-                ORDER BY created_at DESC LIMIT 1
-            """, (str(c_id),)) as cursor:
+            async with db.execute("SELECT manager FROM outbound_logs WHERE client_id = ? AND manager != '' ORDER BY created_at DESC LIMIT 1", (str(c_id),)) as cursor:
                 row = await cursor.fetchone()
                 return row['manager'] if row else ""
     except: return ""
@@ -101,6 +94,7 @@ async def save_tg_media(event):
         return f"{BASE_URL}/get_file/{filename}"
     return None
 
+# --- TELEGRAM EVENT LISTENER ---
 async def start_listener():
     tg = await get_client()
 
@@ -119,44 +113,49 @@ async def start_listener():
         s_id = str(event.sender_id)
         raw_text = (event.raw_text or "").strip()
 
-        # 1. МЕНЕДЖЕР В ТЕМЕ
+        # A. MANAGER INTERACTION
         if s_phone in MANAGERS:
+            # Mask handler #phone/name
             if raw_text.startswith('#'):
                 match = re.search(r'#(\d+)/(.*)', raw_text, re.DOTALL)
                 if not match: return
                 t_phone, c_name_input = match.group(1).strip(), match.group(2).strip()
                 try:
                     ent = await tg.get_entity(t_phone)
-                    c_id = str(ent.id)
                     res = await tg(functions.messages.CreateForumTopicRequest(peer=GROUP_ID, title=f"{c_name_input} {t_phone}"))
                     topic_id = next((u.id for u in res.updates if hasattr(u, 'id')), None)
                     if topic_id:
                         async with aiosqlite.connect(DB_PATH) as db:
                             await db.execute("INSERT OR REPLACE INTO client_topics (client_id, topic_id, client_name, phone, manager_ref) VALUES (?, ?, ?, ?, ?)",
-                                           (c_id, topic_id, c_name_input, t_phone, s_phone))
+                                           (str(ent.id), topic_id, c_name_input, t_phone, s_phone))
                             await db.commit()
-                        await event.reply(f"✅ Тема создана.")
+                        await event.reply(f"✅ Тема создана: {c_name_input}")
                 except Exception as e: await event.reply(f"❌ Ошибка: {str(e)}")
                 return
 
+            # Reply from Topic
             if event.is_group and event.reply_to_msg_id:
                 row = await get_topic_info(event.reply_to_msg_id, by_topic=True)
+                msg_source = "Manager" if row else "1C" # If topic deleted, it's 1C source
+                
                 if row:
                     target_id = int(row['client_id'])
                     f_url = await save_tg_media(event)
-                    if event.message.media: sent = await tg.send_file(target_id, event.message.media, caption=raw_text)
-                    elif raw_text: sent = await tg.send_message(target_id, raw_text)
-                    else: return
-                    m_fio = MANAGERS.get(s_phone, s_phone)
-                    await log_to_db(source="Manager", phone=row['phone'], c_name=row['client_name'], text=raw_text, c_id=str(target_id), manager_fio=m_fio, s_number=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
+                    try:
+                        if event.message.media: sent = await tg.send_file(target_id, event.message.media, caption=raw_text)
+                        elif raw_text: sent = await tg.send_message(target_id, raw_text)
+                        else: return
+                        
+                        m_fio = MANAGERS.get(s_phone, s_phone)
+                        await log_to_db(source=msg_source, phone=row['phone'], c_name=row['client_name'], text=raw_text, c_id=str(target_id), manager_fio=m_fio, s_number=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
+                    except Exception as e: print(f"🔴 Send Error: {e}")
 
-        # 2. КЛИЕНТ ПИШЕТ (ВХОДЯЩИЕ)
+        # B. CLIENT INTERACTION (Inbound)
         elif event.is_private:
             f_url = await save_tg_media(event)
             s_full_name = f"{getattr(sender, 'first_name', '') or ''} {getattr(sender, 'last_name', '') or ''}".strip() or "Client"
             row = await get_topic_info(s_id)
             
-            # ЛОГИКА ОПРЕДЕЛЕНИЯ МЕНЕДЖЕРА И ИСТОЧНИКА
             if row:
                 msg_source = "Manager"
                 m_phone = row['manager_ref']
@@ -164,7 +163,6 @@ async def start_listener():
             else:
                 msg_source = "1C"
                 m_phone = ""
-                # ВАРИАНТ 3: Ищем менеджера в истории логов
                 m_fio = await find_last_manager_in_history(s_id)
             
             await log_to_db(source=msg_source, phone=s_phone, text=raw_text, c_name=s_full_name, c_id=s_id, manager_fio=m_fio, s_number=m_phone, f_url=f_url, direction="in", tg_id=event.message.id)
@@ -175,12 +173,7 @@ async def start_listener():
                     elif raw_text: await tg.send_message(GROUP_ID, f"💬 {raw_text}", reply_to=row['topic_id'])
                 except: pass
 
-@app.before_serving
-async def startup():
-    await init_db()
-    asyncio.create_task(start_listener())
-
-# 3. API РОУТЫ (1С)
+# --- API ROUTES (1C) ---
 @app.route('/send', methods=['POST'])
 async def send_text():
     data = await request.get_json()
@@ -229,6 +222,11 @@ async def fetch_new():
 
 @app.route('/get_file/<filename>')
 async def get_file(filename): return await send_from_directory(FILES_DIR, filename)
+
+@app.before_serving
+async def startup():
+    await init_db()
+    asyncio.create_task(start_listener())
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
