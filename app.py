@@ -53,8 +53,6 @@ async def init_db():
                 client_name TEXT, phone TEXT, manager_ref TEXT
             )
         """)
-        try: await db.execute("ALTER TABLE client_topics ADD COLUMN manager_ref TEXT")
-        except: pass
         await db.commit()
 
 async def log_to_db(source, phone, text, c_name=None, c_id=None, manager_fio=None, s_number=None, f_url=None, direction='in', tg_id=None):
@@ -75,6 +73,21 @@ async def get_topic_info(c_id_or_topic_id, by_topic=False):
         query = "SELECT * FROM client_topics WHERE topic_id = ?" if by_topic else "SELECT * FROM client_topics WHERE client_id = ?"
         async with db.execute(query, (str(c_id_or_topic_id),)) as cursor:
             return await cursor.fetchone()
+
+# НОВАЯ ФУНКЦИЯ: Поиск менеджера в истории исходящих
+async def find_last_manager_in_history(c_id):
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            # Ищем последнюю запись с заполненным менеджером для этого клиента
+            async with db.execute("""
+                SELECT manager FROM outbound_logs 
+                WHERE client_id = ? AND manager IS NOT NULL AND manager != '' 
+                ORDER BY created_at DESC LIMIT 1
+            """, (str(c_id),)) as cursor:
+                row = await cursor.fetchone()
+                return row['manager'] if row else ""
+    except: return ""
 
 async def save_tg_media(event):
     if event.message.media:
@@ -106,7 +119,7 @@ async def start_listener():
         s_id = str(event.sender_id)
         raw_text = (event.raw_text or "").strip()
 
-        # 1. МЕНЕДЖЕР ПИШЕТ ИЗ ТЕМЫ
+        # 1. МЕНЕДЖЕР В ТЕМЕ
         if s_phone in MANAGERS:
             if raw_text.startswith('#'):
                 match = re.search(r'#(\d+)/(.*)', raw_text, re.DOTALL)
@@ -131,38 +144,35 @@ async def start_listener():
                 if row:
                     target_id = int(row['client_id'])
                     f_url = await save_tg_media(event)
-                    try:
-                        if event.message.media:
-                            sent = await tg.send_file(target_id, event.message.media, caption=raw_text)
-                        elif raw_text:
-                            sent = await tg.send_message(target_id, raw_text)
-                        else: return
+                    if event.message.media: sent = await tg.send_file(target_id, event.message.media, caption=raw_text)
+                    elif raw_text: sent = await tg.send_message(target_id, raw_text)
+                    else: return
+                    m_fio = MANAGERS.get(s_phone, s_phone)
+                    await log_to_db(source="Manager", phone=row['phone'], c_name=row['client_name'], text=raw_text, c_id=str(target_id), manager_fio=m_fio, s_number=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
 
-                        m_fio = MANAGERS.get(s_phone, s_phone)
-                        # ПРАВКА: source = Manager (ручной ответ из темы)
-                        await log_to_db(source="Manager", phone=row['phone'], c_name=row['client_name'], text=raw_text, c_id=str(target_id), manager_fio=m_fio, s_number=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
-                    except Exception as e: print(f"🔴 Ошибка отправки: {e}")
-
-        # 2. КЛИЕНТ ПИШЕТ В ТЕМУ
+        # 2. КЛИЕНТ ПИШЕТ (ВХОДЯЩИЕ)
         elif event.is_private:
             f_url = await save_tg_media(event)
             s_full_name = f"{getattr(sender, 'first_name', '') or ''} {getattr(sender, 'last_name', '') or ''}".strip() or "Client"
             row = await get_topic_info(s_id)
             
-            # ПРАВКА: Если есть тема, то source = Manager (диалог в рамках темы), иначе просто Client
-            msg_source = "Manager" if row else "Client"
-            
-            m_phone = row['manager_ref'] if row else ""
-            m_fio = MANAGERS.get(m_phone, "") if m_phone else ""
+            # ЛОГИКА ОПРЕДЕЛЕНИЯ МЕНЕДЖЕРА И ИСТОЧНИКА
+            if row:
+                msg_source = "Manager"
+                m_phone = row['manager_ref']
+                m_fio = MANAGERS.get(m_phone, "")
+            else:
+                msg_source = "1C"
+                m_phone = ""
+                # ВАРИАНТ 3: Ищем менеджера в истории логов
+                m_fio = await find_last_manager_in_history(s_id)
             
             await log_to_db(source=msg_source, phone=s_phone, text=raw_text, c_name=s_full_name, c_id=s_id, manager_fio=m_fio, s_number=m_phone, f_url=f_url, direction="in", tg_id=event.message.id)
             
             if row:
                 try:
-                    if event.message.media:
-                        await tg.send_file(GROUP_ID, event.message.media, caption=f"📎 Файл: {raw_text}", reply_to=row['topic_id'])
-                    elif raw_text:
-                        await tg.send_message(GROUP_ID, f"💬 {raw_text}", reply_to=row['topic_id'])
+                    if event.message.media: await tg.send_file(GROUP_ID, event.message.media, caption=f"📎 Файл: {raw_text}", reply_to=row['topic_id'])
+                    elif raw_text: await tg.send_message(GROUP_ID, f"💬 {raw_text}", reply_to=row['topic_id'])
                 except: pass
 
 @app.before_serving
@@ -180,7 +190,6 @@ async def send_text():
         ent = await tg.get_entity(phone)
         c_name = f"{getattr(ent, 'first_name', '') or ''} {getattr(ent, 'last_name', '') or ''}".strip() or "Client"
         sent = await tg.send_message(ent.id, text)
-        # ПРАВКА: source = 1C (автоматическая отправка)
         await log_to_db(source="1C", phone=phone, c_name=c_name, text=text, c_id=str(ent.id), manager_fio=mgr_fio, s_number="", direction="out", tg_id=sent.id)
         row = await get_topic_info(ent.id)
         if row:
@@ -198,7 +207,6 @@ async def send_file():
         ent = await tg.get_entity(phone)
         c_name = f"{getattr(ent, 'first_name', '') or ''} {getattr(ent, 'last_name', '') or ''}".strip() or "Client"
         sent = await tg.send_file(ent.id, f_url, caption=text)
-        # ПРАВКА: source = 1C (автоматическая отправка файла)
         await log_to_db(source="1C", phone=phone, c_name=c_name, text=text, c_id=str(ent.id), manager_fio=mgr_fio, s_number="", f_url=f_url, direction="out", tg_id=sent.id)
         row = await get_topic_info(ent.id)
         if row:
