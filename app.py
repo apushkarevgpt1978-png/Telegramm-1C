@@ -28,6 +28,7 @@ async def get_client():
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
+        # Твоя основная таблица логов (уже есть)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS outbound_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,9 +38,15 @@ async def init_db():
                 direction TEXT, error_text TEXT, created_at DATETIME, manager TEXT
             )
         """)
-        try:
-            await db.execute("ALTER TABLE outbound_logs ADD COLUMN manager TEXT")
-        except: pass 
+        
+        # --- НОВАЯ ТАБЛИЦА-СПРАВОЧНИК ---
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS client_topics (
+                client_id TEXT PRIMARY KEY,
+                topic_id INTEGER,
+                client_name TEXT
+            )
+        """)
         await db.commit()
 
 async def log_to_db(source, phone, text, c_name=None, c_id=None, manager=None, s_number=None, f_url=None, direction='in', tg_id=None):
