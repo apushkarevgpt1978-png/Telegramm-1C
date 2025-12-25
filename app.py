@@ -72,23 +72,21 @@ async def get_topic_info(c_id_or_topic_id, by_topic=False):
             res = await cursor.fetchone()
             if not res: return None
             
-            # ДОПОЛНИТЕЛЬНАЯ ПРОВЕРКА: Жива ли тема в самом Telegram?
+            # ПРОВЕРКА В TELEGRAM (Метод поправлен на messages.GetDiscussionMessageRequest)
             try:
                 tg = await get_client()
-                # Запрашиваем список тем у группы
-                topics = await tg(functions.channels.GetForumTopicsRequest(
-                    channel=GROUP_ID, offset_date=None, offset_id=0, offset_topic=0, limit=100
+                # Мы пытаемся получить сервисное сообщение темы. Если темы нет - вылетит ошибка.
+                await tg(functions.messages.GetDiscussionMessageRequest(
+                    peer=GROUP_ID,
+                    msg_id=int(res['topic_id'])
                 ))
-                active_ids = [t.id for t in topics.topics]
-                
-                # Если темы из базы нет в списке активных тем группы
-                if res['topic_id'] not in active_ids:
-                    print(f"⚠️ Тема {res['topic_id']} найдена в базе, но отсутствует в Telegram. Удаляю мусор.")
-                    await db.execute("DELETE FROM client_topics WHERE topic_id = ?", (res['topic_id'],))
-                    await db.commit()
-                    return None
             except Exception as e:
-                print(f"⚠️ Ошибка проверки темы в TG: {e}")
+                # Если Telegram вернул ошибку, значит темы не существует
+                print(f"⚠️ Тема {res['topic_id']} невалидна в TG. Очистка базы. Причина: {e}")
+                async with aiosqlite.connect(DB_PATH, timeout=20) as db_del:
+                    await db_del.execute("DELETE FROM client_topics WHERE topic_id = ?", (res['topic_id'],))
+                    await db_del.commit()
+                return None
             
             return dict(res)
 
