@@ -92,32 +92,46 @@ async def start_listener():
 
         # --- 1. ЛОГИКА МЕНЕДЖЕРА ---
         if s_phone in managers_list:
-            # А) Создание темы по маске #номер/Имя
+            # А) Создание диалога или отправка по маске #номер/ТекстИлиИмя
             if raw_text.startswith('#'):
                 match = re.search(r'#(\d+)/(.*)', raw_text, re.DOTALL)
                 if not match:
                     await event.reply("❌ Ошибка! Чтобы создать диалог, заполни маску верно.\nПример для копирования:\n`#79153019495/ИванИванович`")
                     return
                 
-                target_phone, client_name = match.group(1).strip(), match.group(2).strip()
+                target_phone, content = match.group(1).strip(), match.group(2).strip()
                 try:
                     # Поиск клиента в ТГ
                     ent = await tg.get_entity(target_phone)
                     c_id = str(ent.id)
                     
-                    # Создание темы
-                    result = await tg(functions.messages.CreateForumTopicRequest(peer=GROUP_ID, title=client_name))
-                    topic_id = next((u.id for u in result.updates if hasattr(u, 'id')), None)
+                    # Проверяем, есть ли уже диалог в базе
+                    topic_id = await get_topic_from_db(c_id)
                     
-                    if topic_id:
-                        # Запись в базу
-                        async with aiosqlite.connect(DB_PATH) as db:
-                            await db.execute("INSERT OR REPLACE INTO client_topics (client_id, topic_id, client_name) VALUES (?, ?, ?)",
-                                           (c_id, topic_id, client_name))
-                            await db.commit()
-                        await event.reply(f"✅ Тема создана! ID: {topic_id}. Теперь пишите клиенту там.")
+                    if not topic_id:
+                        # Если диалога нет — СОЗДАЕМ
+                        display_title = f"{target_phone} {content}"
+                        result = await tg(functions.messages.CreateForumTopicRequest(peer=GROUP_ID, title=display_title))
+                        topic_id = next((u.id for u in result.updates if hasattr(u, 'id')), None)
+                        
+                        if topic_id:
+                            async with aiosqlite.connect(DB_PATH) as db:
+                                await db.execute("INSERT OR REPLACE INTO client_topics (client_id, topic_id, client_name) VALUES (?, ?, ?)",
+                                               (c_id, topic_id, content))
+                                await db.commit()
+                            await event.reply(f"✅ Диалог создан! ID: {topic_id}. Теперь сообщения будут приходить в отдельную ветку.")
+                    else:
+                        # Если диалог УЖЕ ЕСТЬ — просто отправляем сообщение клиенту
+                        f_url = await save_tg_media(event)
+                        sent = await (tg.send_file(ent.id, os.path.join(FILES_DIR, f_url.split('/')[-1]), caption=content) if f_url else tg.send_message(ent.id, content))
+                        
+                        # Записываем в базу и ДУБЛИРУЕМ в тему для истории
+                        await log_to_db(source="Manager", phone=target_phone, text=content, c_id=c_id, manager=s_phone, f_url=f_url, direction="out", tg_id=sent.id)
+                        await tg.send_message(GROUP_ID, f"📤 Мой ответ: {content}", reply_to=topic_id)
+                        await event.reply("✅ Отправлено и добавлено в диалог")
+
                 except Exception as e:
-                    await event.reply(f"❌ Ошибка при создании: {str(e)}")
+                    await event.reply(f"❌ Ошибка: {str(e)}")
                 return
 
             # Б) Ответ менеджера внутри темы клиенту
