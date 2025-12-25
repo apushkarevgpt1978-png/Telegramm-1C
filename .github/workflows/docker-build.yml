@@ -2,7 +2,7 @@ name: Build and Push Docker Image
 
 on:
   push:
-    branches: [ "main" ] # Сборка запускается, когда ты правишь файлы в ветке main
+    branches: [ "main" ] 
 
 jobs:
   build:
@@ -27,4 +27,4 @@ jobs:
         with:
           context: .
           push: true
-          tags: ghcr.io/${{ github.repository }}:latest
+          tags: ghcr.io/apushkarevgpt1978-png/telegramm-1c:latest
