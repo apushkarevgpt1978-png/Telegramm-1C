@@ -27,8 +27,12 @@ if not os.path.exists(FILES_DIR): os.makedirs(FILES_DIR)
 client = None
 
 async def get_client():
-    client = TelegramClient(SESSION_PATH, int(API_ID), API_HASH)
-    await client.connect() # connect просто подключается, не спрашивая телефон
+    global client
+    if client is None:
+        client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
+    
+    if not client.is_connected():
+        await client.connect() # ЗАМЕНИЛИ start() на connect()
     return client
 
 async def init_db():
