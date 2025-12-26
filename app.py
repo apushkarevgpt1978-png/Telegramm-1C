@@ -14,7 +14,6 @@ FILES_DIR = '/app/files'
 BASE_URL = os.environ.get('BASE_URL', 'http://192.168.121.99:5000')
 GROUP_ID = -1003599844429
 
-# Green-API Config
 WA_ID_INSTANCE = os.environ.get('WA_ID_INSTANCE', '')
 WA_API_TOKEN = os.environ.get('WA_API_TOKEN', '')
 WA_API_URL = f"https://api.green-api.com/waInstance{WA_ID_INSTANCE}"
@@ -41,7 +40,7 @@ async def init_db():
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 source TEXT, phone TEXT, client_name TEXT, client_id TEXT,
                 sender_number TEXT, messenger TEXT, message_text TEXT,
-                file_url TEXT, status TEXT DEFAULT 'pending', tg_message_id INTEGER,
+                file_url TEXT, status TEXT DEFAULT 'pending', tg_message_id TEXT,
                 direction TEXT, error_text TEXT, created_at DATETIME, manager TEXT
             )
         """)
@@ -56,24 +55,19 @@ async def init_db():
         await db.commit()
 
 async def log_to_db(source, phone, text, c_name=None, c_id=None, manager_fio=None, s_number=None, f_url=None, direction='in', tg_id=None, messenger='tg'):
-    # ЗАЩИТА 1С: Убираем NULL (None), заменяя на пустые строки или дефолты
-    source = str(source or "Система")
-    phone = str(phone or "")
-    c_name = str(c_name or phone or "Клиент")
-    c_id = str(c_id or phone or "")
-    manager_fio = str(manager_fio or "Система")
-    s_number = str(s_number or "")
-    text = str(text or "")
-    f_url = str(f_url or "")
-    messenger = str(messenger or "tg")
-    
+    """Логирование с защитой от NULL для 1С"""
     try:
         async with aiosqlite.connect(DB_PATH, timeout=10) as db:
             await db.execute("""
                 INSERT INTO outbound_logs 
                 (source, phone, client_name, client_id, manager, sender_number, messenger, message_text, file_url, status, direction, tg_message_id, created_at) 
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (source, phone, c_name, c_id, manager_fio, s_number, messenger, text, f_url, 'pending', direction, tg_id, datetime.now()))
+            """, (
+                str(source or "Система"), str(phone or ""), str(c_name or phone or "Клиент"), 
+                str(c_id or ""), str(manager_fio or "Система"), str(s_number or ""), 
+                str(messenger or "tg"), str(text or ""), str(f_url or ""), 'pending', 
+                str(direction or "in"), str(tg_id or ""), datetime.now()
+            ))
             await db.commit()
     except Exception as e: print(f"⚠️ DB Error: {e}")
 
@@ -88,11 +82,10 @@ async def get_topic_info_with_retry(c_id_or_topic_id, by_topic=False):
                 tg = await get_client()
                 res = await tg.get_messages(GROUP_ID, ids=int(row['topic_id']))
                 if res and not isinstance(res, types.MessageEmpty): return dict(row)
-                raise ValueError()
-            except:
-                await db.execute("DELETE FROM client_topics WHERE client_id = ?", (str(row['client_id']),))
+                await db.execute("DELETE FROM client_topics WHERE topic_id = ?", (row['topic_id'],))
                 await db.commit()
                 return None
+            except: return dict(row)
 
 # --- WHATSAPP HELPERS ---
 async def download_wa_file(file_id, file_name):
@@ -108,7 +101,8 @@ async def download_wa_file(file_id, file_name):
     return ""
 
 async def wa_listener():
-    print("🚀 Поллинг WhatsApp запущен...")
+    """Слушатель Green-API с захватом полей для 1С"""
+    print("🚀 WhatsApp Listener запущен (Polling)")
     async with httpx.AsyncClient() as wa_c:
         while True:
             try:
@@ -119,34 +113,43 @@ async def wa_listener():
                     body = data.get('body', {})
                     
                     if body.get('typeWebhook') == 'incomingMessageReceived':
-                        s_data = body.get('senderData', {})
-                        phone = s_data.get('chatId', '').split('@')[0]
-                        name = s_data.get('senderName', 'WA Client')
+                        # Захват данных как в 1С
+                        id_message = body.get('idMessage')
+                        chat_id = body.get('chatId', '')
+                        sender_data = body.get('senderData', {})
+                        sender_id = sender_data.get('chatId', '')
+                        sender_name = sender_data.get('senderName', 'WA Client')
                         m_data = body.get('messageData', {})
                         m_type = m_data.get('typeMessage', '')
                         
+                        phone = chat_id.split('@')[0]
                         text, f_url = "", ""
-                        if m_type == 'textMessage': 
+
+                        # Парсинг контента
+                        if m_type == 'textMessage':
                             text = m_data.get('textMessageData', {}).get('text', '')
-                        elif m_type == 'extendedTextMessage': 
+                        elif m_type == 'extendedTextMessage':
                             text = m_data.get('extendedTextMessageData', {}).get('text', '')
-                        elif 'fileMessageData' in m_data:
-                            fd = m_data['fileMessageData']
-                            text = fd.get('caption', '[Файл]')
-                            f_url = await download_wa_file(fd.get('fileId'), fd.get('fileName', 'file'))
-                        
-                        await handle_wa_incoming(phone, name, text or "[Медиа]", f_url)
+                        elif m_type in ['imageMessage', 'documentMessage', 'videoMessage']:
+                            f_info = m_data.get(m_type)
+                            if f_info:
+                                text = f_info.get('caption', '')
+                                f_url = await download_wa_file(f_info.get('fileId'), f_info.get('fileName', 'file'))
+                                if not text:
+                                    labels = {'imageMessage': 'Фото', 'documentMessage': 'Документ', 'videoMessage': 'Видео'}
+                                    text = f"📎 {labels.get(m_type, 'Файл')}"
+
+                        await handle_wa_incoming(phone, sender_name, text, f_url, id_message, sender_id)
 
                     await wa_c.delete(f"{WA_API_URL}/deleteNotification/{WA_API_TOKEN}/{receipt_id}")
                 await asyncio.sleep(1)
             except: await asyncio.sleep(5)
 
-async def handle_wa_incoming(phone, name, text, f_url):
+async def handle_wa_incoming(phone, name, text, f_url, id_msg, s_id):
     tg = await get_client()
     row = await get_topic_info_with_retry(phone)
     if not row:
         try:
-            # Название темы БЕЗ скобок
             res = await tg(functions.messages.CreateForumTopicRequest(peer=GROUP_ID, title=f"WA {name} {phone}"))
             topic_id = next((u.id for u in res.updates if hasattr(u, 'id')), None)
             if topic_id:
@@ -154,13 +157,13 @@ async def handle_wa_incoming(phone, name, text, f_url):
                     await db.execute("INSERT OR REPLACE INTO client_topics (client_id, topic_id, client_name, phone, manager_ref, messenger) VALUES (?, ?, ?, ?, ?, ?)",
                                    (phone, topic_id, name, phone, "system", "wa"))
                     await db.commit()
-                row = {'topic_id': topic_id, 'client_name': name, 'phone': phone}
+                row = {'topic_id': topic_id}
         except: return
 
-    display_text = f"🟢 WhatsApp | {name}:\n{text}"
-    if f_url: display_text += f"\n📎 {f_url}"
-    await tg.send_message(GROUP_ID, display_text, reply_to=row['topic_id'])
-    await log_to_db(source="Manager", phone=phone, text=text, c_name=name, c_id=phone, f_url=f_url, direction="in", messenger="wa")
+    display_msg = f"🟢 WhatsApp | {name}:\n{text}"
+    if f_url: display_msg += f"\n📎 {f_url}"
+    await tg.send_message(GROUP_ID, display_msg, reply_to=row['topic_id'])
+    await log_to_db(source="Manager", phone=phone, text=text, c_name=name, c_id=s_id, f_url=f_url, direction="in", tg_id=id_msg, messenger="wa")
 
 # --- TELEGRAM HANDLERS ---
 async def start_listener():
@@ -186,20 +189,15 @@ async def start_listener():
             row = await get_topic_info_with_retry(event.reply_to_msg_id, by_topic=True)
             if row:
                 text = (event.raw_text or "").strip()
-                # Сохраняем медиа если оно есть
                 f_url = ""
                 if event.message.media:
-                    ext = ".jpg" # дефолт
-                    if hasattr(event.message.media, 'document'):
-                        for attr in event.message.media.document.attributes:
-                            if hasattr(attr, 'file_name'): ext = os.path.splitext(attr.file_name)[1]
-                    fname = f"{uuid.uuid4()}{ext}"
+                    fname = f"{uuid.uuid4()}.jpg"
                     await event.message.download_media(file=os.path.join(FILES_DIR, fname))
                     f_url = f"{BASE_URL}/get_file/{fname}"
 
                 if row.get('messenger') == 'wa':
                     async with httpx.AsyncClient() as wa_c:
-                        if f_url: # ОТПРАВКА В WA ЧЕРЕЗ URL
+                        if f_url:
                             await wa_c.post(f"{WA_API_URL}/sendFileByUrl/{WA_API_TOKEN}", json={
                                 "chatId": f"{row['phone']}@c.us", "urlFile": f_url, "fileName": "file", "caption": text
                             })
@@ -209,12 +207,17 @@ async def start_listener():
                             })
                     await log_to_db(source="Manager", phone=row['phone'], text=text, c_name=row['client_name'], c_id=row['client_id'], manager_fio=MANAGERS.get(s_phone, ""), f_url=f_url, direction="out", messenger="wa")
                 else:
-                    # TG
-                    ent = await tg.get_entity(int(row['client_id']))
-                    if event.message.media: sent = await tg.send_file(ent, event.message.media, caption=text)
-                    else: sent = await tg.send_message(ent, text)
+                    target = await tg.get_entity(int(row['client_id']))
+                    sent = await tg.send_file(target, event.message.media, caption=text) if event.message.media else await tg.send_message(target, text)
                     await log_to_db(source="Manager", phone=row['phone'], text=text, c_name=row['client_name'], c_id=row['client_id'], manager_fio=MANAGERS.get(s_phone, ""), f_url=f_url, direction="out", tg_id=sent.id, messenger="tg")
             return
+
+        if event.is_private:
+            row = await get_topic_info_with_retry(str(event.sender_id))
+            if row:
+                if event.message.media: await tg.send_file(GROUP_ID, event.message.media, caption=f"💬 {event.raw_text}", reply_to=row['topic_id'])
+                else: await tg.send_message(GROUP_ID, f"💬 {event.raw_text}", reply_to=row['topic_id'])
+            await log_to_db(source="Manager", phone=s_phone, text=event.raw_text, c_name=f"{getattr(sender, 'first_name', '')}", c_id=str(event.sender_id), direction="in", messenger="tg")
 
         if event.is_group and event.raw_text.startswith('#'):
             match = re.search(r'#(\d+)/(.*)', event.raw_text, re.DOTALL)
@@ -229,7 +232,7 @@ async def start_listener():
                             await db.execute("INSERT OR REPLACE INTO client_topics (client_id, topic_id, client_name, phone, manager_ref, messenger) VALUES (?, ?, ?, ?, ?, ?)",
                                            (str(ent.id), t_id, c_name, t_phone, s_phone, "tg"))
                             await db.commit()
-                        await event.reply(f"✅ ТГ Тема создана")
+                        await event.reply(f"✅ Тема создана")
                 except Exception as e: await event.reply(f"❌ {e}")
 
 # --- API ---
@@ -253,12 +256,27 @@ async def api_send():
 async def fetch_new():
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT * FROM outbound_logs WHERE status = 'pending'") as c:
-            rows = [dict(r) for r in await c.fetchall()]
-        if rows:
+        async with db.execute("SELECT * FROM outbound_logs WHERE status = 'pending' AND direction = 'in'") as c:
+            rows = await c.fetchall()
+        
+        result = []
+        for r in rows:
+            # Имитируем поля Green-API для твоей 1С
+            item = {
+                "idMessage": r['tg_message_id'], 
+                "senderId": r['client_id'],
+                "chatId": f"{r['phone']}@c.us" if r['messenger'] == 'wa' else r['phone'],
+                "senderName": r['client_name'],
+                "textMessage": r['message_text'],
+                "downloadUrl": r['file_url'],
+                "typeMessage": "imageMessage" if r['file_url'] else "textMessage"
+            }
+            result.append(item)
+            
+        if result:
             await db.execute(f"UPDATE outbound_logs SET status='ok' WHERE id IN ({','.join(['?']*len(rows))})", [r['id'] for r in rows])
             await db.commit()
-        return jsonify(rows)
+        return jsonify(result)
 
 @app.route('/get_file/<filename>')
 async def get_file(filename): return await send_from_directory(FILES_DIR, filename)
