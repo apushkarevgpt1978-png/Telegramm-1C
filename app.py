@@ -206,12 +206,10 @@ async def send_text():
     tg = await get_client()
     try:
         ent = await tg.get_entity(phone)
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("DELETE FROM client_topics WHERE client_id = ?", (str(ent.id),))
-            await db.commit()
+        # УДАЛИЛИ DELETE FROM client_topics — теперь связь не рвется!
         sent = await tg.send_message(ent, text)
         await log_to_db(source="1C", phone=phone, c_name=f"{ent.first_name or ''}", text=text, c_id=str(ent.id), manager_fio=mgr_fio, direction="out", tg_id=sent.id)
-        print(f"🚀 [API] Текст отправлен клиенту {ent.id}")
+        print(f"🚀 [API] Сообщение отправлено, тема сохранена (клиент {ent.id})")
         return jsonify({"status": "ok"}), 200
     except Exception as e: return jsonify({"error": str(e)}), 500
 
@@ -222,12 +220,10 @@ async def send_file():
     tg = await get_client()
     try:
         ent = await tg.get_entity(phone)
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("DELETE FROM client_topics WHERE client_id = ?", (str(ent.id),))
-            await db.commit()
+        # УДАЛИЛИ DELETE FROM client_topics — теперь связь не рвется!
         sent = await tg.send_file(ent, f_url, caption=text)
         await log_to_db(source="1C", phone=phone, c_name=f"{ent.first_name or ''}", text=text, c_id=str(ent.id), manager_fio=mgr_fio, f_url=f_url, direction="out", tg_id=sent.id)
-        print(f"🚀 [API] Файл отправлен клиенту {ent.id}")
+        print(f"🚀 [API] Файл отправлен, тема сохранена (клиент {ent.id})")
         return jsonify({"status": "ok"}), 200
     except Exception as e: return jsonify({"error": str(e)}), 500
 
