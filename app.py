@@ -29,10 +29,16 @@ client = None
 async def get_client():
     global client
     if client is None:
+        # Убедись, что SESSION_PATH ведет на GenaAPI без папок, если файл лежит в корне
         client = TelegramClient(SESSION_PATH, API_ID, API_HASH)
     
     if not client.is_connected():
-        await client.connect() # ЗАМЕНИЛИ start() на connect()
+        await client.connect()
+    
+    # Проверка: если файл сессии не подхватился, не пытаемся запустить ввод телефона
+    if not await client.is_user_authorized():
+        print("❌ ОШИБКА: Сервер не авторизован. Файл .session не найден или не валиден.")
+        # Здесь мы НЕ вызываем start(), чтобы не вешать сервер
     return client
 
 async def init_db():
