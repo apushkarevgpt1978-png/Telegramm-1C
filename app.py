@@ -43,56 +43,101 @@ async def get_client():
 
 async def init_db():
     async with aiosqlite.connect(DB_PATH) as db:
+        # Таблица логов: добавили topic_id
         await db.execute("""
             CREATE TABLE IF NOT EXISTS outbound_logs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                source TEXT, phone TEXT, client_name TEXT, client_id TEXT,
-                sender_number TEXT, messenger TEXT DEFAULT 'tg', message_text TEXT,
-                file_url TEXT, status TEXT DEFAULT 'pending', tg_message_id INTEGER,
-                direction TEXT, error_text TEXT, created_at DATETIME, manager TEXT
+                source TEXT, 
+                phone TEXT, 
+                client_name TEXT, 
+                client_id TEXT,
+                sender_number TEXT, 
+                messenger TEXT DEFAULT 'tg', 
+                message_text TEXT,
+                file_url TEXT, 
+                status TEXT DEFAULT 'pending', 
+                tg_message_id INTEGER,
+                topic_id INTEGER, -- Наша новая колонка
+                direction TEXT, 
+                error_text TEXT, 
+                created_at DATETIME, 
+                manager TEXT
             )
         """)
+        
+        # Таблица тем: добавили messenger
         await db.execute("""
             CREATE TABLE IF NOT EXISTS client_topics (
-                client_id TEXT PRIMARY KEY, topic_id INTEGER,
-                client_name TEXT, phone TEXT, manager_ref TEXT
+                client_id TEXT PRIMARY KEY, 
+                topic_id INTEGER,
+                client_name TEXT, 
+                phone TEXT, 
+                manager_ref TEXT,
+                messenger TEXT DEFAULT 'tg' -- Наша новая колонка
             )
         """)
         await db.commit()
-        print("✅ База данных готова")
+        print("✅ База данных (структура) актуализирована")
 
-async def log_to_db(source, phone, text, c_name=None, c_id=None, manager_fio=None, s_number=None, f_url=None, direction='in', tg_id=None):
+async def log_to_db(source, phone, text, c_name=None, c_id=None, manager_fio=None, s_number=None, f_url=None, direction='in', tg_id=None, topic_id=None, messenger='tg'):
+    """Логирует сообщение в базу данных, включая ID темы (topic_id)"""
     created_at = datetime.now()
     try:
         async with aiosqlite.connect(DB_PATH, timeout=10) as db:
             await db.execute("""
                 INSERT INTO outbound_logs 
-                (source, phone, client_name, client_id, manager, sender_number, messenger, message_text, file_url, status, direction, tg_message_id, created_at) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (str(source), str(phone or ""), str(c_name or ""), str(c_id or ""), str(manager_fio or ""), str(s_number or ""), 'tg', str(text or ""), f_url, 'pending', direction, tg_id, created_at))
+                (source, phone, client_name, client_id, manager, sender_number, messenger, message_text, file_url, status, direction, tg_message_id, topic_id, created_at) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                str(source), 
+                str(phone or ""), 
+                str(c_name or ""), 
+                str(c_id or ""), 
+                str(manager_fio or ""), 
+                str(s_number or ""), 
+                str(messenger), # Теперь передаем переменную вместо жесткого 'tg'
+                str(text or ""), 
+                f_url, 
+                'pending', 
+                direction, 
+                tg_id, 
+                topic_id, # Добавленный ID темы
+                created_at
+            ))
             await db.commit()
-    except Exception as e: print(f"⚠️ DB Error: {e}")
+    except Exception as e: 
+        print(f"⚠️ DB Error: {e}")
 
-async def get_topic_info_with_retry(c_id_or_topic_id, by_topic=False):
-    """Проверяет тему в базе и подтверждает её существование в Telegram"""
+async def get_topic_info_with_retry(phone_number):
+    """
+    Ищет тему в базе по номеру телефона и проверяет её наличие в Telegram.
+    Ревизия (удаление) отключена.
+    """
+    # Очищаем номер телефона от лишних символов, если нужно (оставляем только цифры)
+    clean_phone = str(''.join(filter(str.isdigit, str(phone_number))))
+
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
         db.row_factory = aiosqlite.Row
-        query = "SELECT * FROM client_topics WHERE topic_id = ?" if by_topic else "SELECT * FROM client_topics WHERE client_id = ?"
-        async with db.execute(query, (str(c_id_or_topic_id),)) as cursor:
+        # Ищем строго по номеру телефона (client_id)
+        query = "SELECT * FROM client_topics WHERE client_id = ?"
+        
+        async with db.execute(query, (clean_phone,)) as cursor:
             row = await cursor.fetchone()
-            if not row: return None
+            if not row:
+                return None
             
             try:
                 tg = await get_client()
-                # Пытаемся получить сервисное сообщение темы
+                # Проверяем, существует ли тема в Telegram физически
                 res = await tg.get_messages(GROUP_ID, ids=int(row['topic_id']))
+                
                 if res and not isinstance(res, types.MessageEmpty):
                     return dict(row)
-                else: raise ValueError("Topic not found in TG")
-            except Exception as e:
-                # print(f"🔍 [РЕВИЗИЯ] Удаление битой темы {row['topic_id']}: {e}")
-                # await db.execute("DELETE FROM client_topics WHERE client_id = ?", (str(row['client_id']),))
-                # await db.commit()
+                else:
+                    # Если в TG темы нет, просто возвращаем None, не удаляя из базы
+                    return None
+            except Exception:
+                # В случае любой ошибки связи с TG просто возвращаем None
                 return None
 
 async def find_last_outbound_manager(c_id):
