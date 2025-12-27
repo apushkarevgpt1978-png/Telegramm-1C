@@ -295,18 +295,20 @@ async def start_listener():
 async def send_text():
     data = await request.get_json()
     
-    # 1. Парсим данные (удалили дубли)
     phone = str(data.get("phone", "")).lstrip('+').strip()
     text = data.get("text", "")
     mgr_fio = str(data.get("manager", ""))
+    # 1. Получаем имя из запроса 1С. Если его нет — используем номер телефона
+    c_name_from_1c = data.get("client_name", phone) 
     messenger = str(data.get("messenger", "tg")).lower()
 
-    # 2. Ищем или создаем тему (Topic)
+    # 2. Ищем или создаем тему
     topic_info = await get_topic_info_with_retry(phone)
     if topic_info and topic_info.get('topic_id'):
         topic_id = topic_info['topic_id']
     else:
-        topic_id = await create_new_topic(phone, phone, messenger=messenger)
+        # ПЕРЕДАЕМ ИМЯ в функцию создания темы
+        topic_id = await create_new_topic(phone, c_name_from_1c, messenger=messenger)
 
     if not topic_id:
         return jsonify({"error": "Не удалось найти или создать тему в ТГ"}), 500
