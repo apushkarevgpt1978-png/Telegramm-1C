@@ -182,8 +182,6 @@ async def create_new_topic(client_id, client_name, messenger='tg'):
         print(f"❌ Критическая ошибка в create_new_topic: {e}")
         return None
 
-# Обработчик сервисных действий в чате (удаление тем)
-@client.on(events.ChatAction)
 async def handler_chat_action(event):
     try:
         # Проверяем, является ли действие удалением темы форума
@@ -206,8 +204,6 @@ async def handler_chat_action(event):
     except Exception as e:
         print(f"⚠️ Ошибка при обработке удаления темы: {e}")
 
-# Дополнительный обработчик для точного отлова удаления тем (через Raw Updates)
-@client.on(events.Raw(types.UpdateTimeline) if hasattr(types, 'UpdateTimeline') else events.Raw())
 async def raw_handler(update):
     if isinstance(update, types.UpdateDeleteMessages):
         # Если удаляются сообщения, проверяем, не были ли это сервисные сообщения тем
@@ -264,6 +260,12 @@ async def save_tg_media(event):
 
 async def start_listener():
     tg = await get_client()
+
+    # Регистрация обработчиков вручную (чтобы не было NoneType)
+    tg.add_event_handler(handler_chat_action, events.ChatAction)
+    tg.add_event_handler(raw_handler, events.Raw(types.UpdateDeleteMessages))
+    
+    print("✅ Обработчики событий успешно подключены")
 
     @tg.on(events.ChatAction)
     async def action_handler(event):
