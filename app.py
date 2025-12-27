@@ -158,19 +158,25 @@ async def create_new_topic(client_id, client_name, messenger='tg'):
                         break
 
         if new_topic_id:
-            # ЗАПИСЬ В БАЗУ: теперь вносим и group_id
+            # ЗАПИСЬ В БАЗУ: приводим в соответствие со всеми 7 колонками
             async with aiosqlite.connect(DB_PATH, timeout=10) as db:
                 await db.execute("""
                     INSERT OR REPLACE INTO client_topics 
-                    (client_id, topic_id, client_name, messenger, group_id)
-                    VALUES (?, ?, ?, ?, ?)
-                """, (str(client_id), new_topic_id, str(client_name), messenger, str(GROUP_ID)))
+                    (client_id, topic_id, client_name, phone, manager_ref, messenger, group_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    str(client_id),    # client_id
+                    new_topic_id,      # topic_id
+                    str(client_name),  # client_name
+                    str(client_id),    # phone (обычно это тот же номер, что и id)
+                    None,              # manager_ref (ставим None, если сейчас нет данных)
+                    str(messenger),    # messenger
+                    str(GROUP_ID)      # group_id
+                ))
                 await db.commit()
             
-            print(f"✅ Тема {new_topic_id} привязана к группе {GROUP_ID} в базе")
+            print(f"✅ Тема {new_topic_id} создана (Группа: {GROUP_ID}, Клиент: {client_name})")
             return new_topic_id
-        
-        return None
             
     except Exception as e:
         print(f"❌ Критическая ошибка в create_new_topic: {e}")
