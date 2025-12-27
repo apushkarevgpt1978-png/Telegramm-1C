@@ -120,9 +120,9 @@ async def create_new_topic(client_id, client_name, messenger='tg'):
         tg = await get_client()
         topic_title = f"{client_name} ({client_id})" if client_id != client_name else client_name
         
-        result = await tg(functions.channels.CreateForumTopicRequest(
-            channel=GROUP_ID,
-            title=topic_title
+        result = await tg(functions.messages.CreateForumTopicRequest(
+        peer=GROUP_ID, # И замени 'channel' на 'peer' — это стандарт для этого запроса
+        title=topic_title
         ))
         new_topic_id = result.updates[0].message.id
         
