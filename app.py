@@ -270,7 +270,11 @@ async def save_tg_media(event):
     return None
 
 async def start_listener():
+
+    print(f"начинаем слушать")
     tg = await get_client()
+
+    print(f"слушаем")
 
     tg.add_event_handler(handler_chat_action, events.ChatAction)
     
