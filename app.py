@@ -118,44 +118,56 @@ async def log_to_db(source, phone, text, c_name=None, c_id=None, manager_fio=Non
 async def create_new_topic(client_id, client_name, messenger='tg'):
     try:
         tg = await get_client()
-        topic_title = f"{client_name} ({client_id})" if client_id != client_name else client_name
+        # Формируем заголовок: "Имя (Телефон)" или просто "Клиент (Телефон)"
+        if str(client_id) != str(client_name):
+            topic_title = f"{client_name} ({client_id})"
+        else:
+            topic_title = f"Клиент {client_id}"
+            
         new_topic_id = None
+        print(f"🛠 Создание темы: {topic_title}...")
 
         try:
-            # Пытаемся создать тему
+            # Пытаемся создать тему через API
             result = await tg(functions.messages.CreateForumTopicRequest(
                 peer=GROUP_ID,
                 title=topic_title
             ))
-            # Если все ок, берем ID из ответа
-            new_topic_id = result.updates[0].message.id
+            # Пробуем вытащить ID из разных типов ответа (совместимость версий)
+            for update in result.updates:
+                if hasattr(update, 'id'): 
+                    new_topic_id = update.id
+                    break
         except Exception as e:
-            # Если вылетела ошибка Constructor ID или любая другая при создании
-            print(f"⚠️ Запрос создания вызвал ошибку, проверяем создалась ли тема: {e}")
-            await asyncio.sleep(1.5) # Даем время Telegram обновить кэш
-            
-            # Просто ищем тему с таким названием в группе
-            async for topic in tg.iter_forum_topics(GROUP_ID, search=client_id):
-                new_topic_id = topic.id
-                break
-        
-        if not new_topic_id:
-            print("❌ Не удалось получить ID темы даже через поиск")
-            return None
+            print(f"⚠️ Ошибка вызова (возможно, старая библиотека): {e}")
 
-        # Сохраняем в базу
-        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
-            await db.execute("""
-                INSERT OR REPLACE INTO client_topics (client_id, topic_id, client_name, messenger)
-                VALUES (?, ?, ?, ?)
-            """, (str(client_id), new_topic_id, str(client_name), messenger))
-            await db.commit()
+        # СТРАХОВКА: Если ID не получили, ищем сервисное сообщение о создании в истории
+        if not new_topic_id:
+            print("🔍 Поиск темы в истории группы...")
+            await asyncio.sleep(2) # Пауза, чтобы Telegram успел обработать
+            async for msg in tg.iter_messages(GROUP_ID, limit=15):
+                if hasattr(msg, 'action') and isinstance(msg.action, types.MessageActionTopicCreate):
+                    # Если в заголовке темы есть номер телефона — это наша тема
+                    if str(client_id) in msg.action.title:
+                        new_topic_id = msg.id
+                        break
+
+        if new_topic_id:
+            # ГАРАНТИРОВАННАЯ ЗАПИСЬ В БАЗУ
+            async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+                await db.execute("""
+                    INSERT OR REPLACE INTO client_topics (client_id, topic_id, client_name, messenger)
+                    VALUES (?, ?, ?, ?)
+                """, (str(client_id), new_topic_id, str(client_name), messenger))
+                await db.commit()
+            print(f"✅ Тема {new_topic_id} создана и привязана к {client_name}")
+            return new_topic_id
+        else:
+            print("❌ Не удалось найти ID темы в истории группы")
+            return None
             
-        print(f"✅ Тема готова! ID: {new_topic_id} для {client_id}")
-        return new_topic_id
-        
     except Exception as e:
-        print(f"❌ Критическая ошибка в create_new_topic: {e}")
+        print(f"❌ Критическая ошибка create_new_topic: {e}")
         return None
 
 async def get_topic_info_with_retry(phone_number):
@@ -295,50 +307,47 @@ async def start_listener():
 async def send_text():
     data = await request.get_json()
     
+    # Извлекаем данные
     phone = str(data.get("phone", "")).lstrip('+').strip()
     text = data.get("text", "")
     mgr_fio = str(data.get("manager", ""))
-    # 1. Получаем имя из запроса 1С. Если его нет — используем номер телефона
-    c_name_from_1c = data.get("client_name", phone) 
+    
+    # Берем имя из 1С. Если 1С его не прислала, подставляем номер телефона
+    c_name = data.get("client_name", phone)
+    
+    # Определяем мессенджер (wa или tg)
     messenger = str(data.get("messenger", "tg")).lower()
 
-    # 2. Ищем или создаем тему
+    # Ищем тему в базе
     topic_info = await get_topic_info_with_retry(phone)
     if topic_info and topic_info.get('topic_id'):
         topic_id = topic_info['topic_id']
     else:
-        # ПЕРЕДАЕМ ИМЯ в функцию создания темы
-        topic_id = await create_new_topic(phone, c_name_from_1c, messenger=messenger)
+        # Если темы нет — создаем её с переданным именем
+        topic_id = await create_new_topic(phone, c_name, messenger=messenger)
 
     if not topic_id:
-        return jsonify({"error": "Не удалось найти или создать тему в ТГ"}), 500
+        return jsonify({"error": "Не удалось создать ветку в Telegram"}), 500
 
     try:
-        # 3. РАЗВИЛКА: WhatsApp или Telegram
+        # Развилка: WhatsApp или Telegram
         if any(word in messenger for word in ["wa", "whatsapp", "вотсап"]):
-            # ОТПРАВКА В WHATSAPP
             success, msg_id = await send_whatsapp_message(phone, text)
             used_messenger = "wa"
         else:
-            # ОТПРАВКА В TELEGRAM (в конкретный Topic группы!)
             tg = await get_client()
+            # Отправляем в конкретный Topic группы
             sent = await tg.send_message(GROUP_ID, text, reply_to=topic_id)
             success, msg_id = True, sent.id
             used_messenger = "tg"
 
-        # 4. ЛОГИРОВАНИЕ
         if success:
+            # Логируем отправку (теперь с topic_id и правильным мессенджером)
             await log_to_db(
-                source="1C", 
-                phone=phone, 
-                text=text, 
-                manager_fio=mgr_fio, 
-                direction="out", 
-                tg_id=msg_id, 
-                topic_id=topic_id, 
-                messenger=used_messenger
+                source="1C", phone=phone, text=text, manager_fio=mgr_fio,
+                direction="out", tg_id=msg_id, topic_id=topic_id, messenger=used_messenger
             )
-            print(f"🚀 [API] Сообщение отправлено через {used_messenger}")
+            print(f"🚀 Сообщение отправлено в {used_messenger} (Тема: {topic_id})")
             return jsonify({"status": "ok", "topic_id": topic_id}), 200
         else:
             return jsonify({"error": msg_id}), 400
