@@ -118,55 +118,53 @@ async def log_to_db(source, phone, text, c_name=None, c_id=None, manager_fio=Non
 async def create_new_topic(client_id, client_name, messenger='tg'):
     try:
         tg = await get_client()
-        # Формируем имя темы (теперь с поддержкой имени клиента из 1С)
-        if str(client_id) != str(client_name):
-            topic_title = f"{client_name} ({client_id})"
+        
+        # Красивый заголовок с учетом твоей просьбы не дублировать номер
+        if str(client_id) == str(client_name) or "Клиент" in str(client_name):
+            topic_title = str(client_name)
         else:
-            topic_title = f"Клиент {client_id}"
+            topic_title = f"{client_name} ({client_id})"
             
         new_topic_id = None
-        print(f"🛠 Попытка создания темы: {topic_title}...")
+        print(f"🛠 Создание темы: {topic_title} в группе {GROUP_ID}...")
 
         try:
-            # 1. Запрос на создание
+            # Пытаемся создать тему через API
             result = await tg(functions.messages.CreateForumTopicRequest(
                 peer=GROUP_ID,
                 title=topic_title
             ))
-            # 2. Пытаемся достать ID из любого типа ответа (включая UpdateMessageID)
+            # Достаем ID темы из любого типа ответа
             for update in result.updates:
                 if hasattr(update, 'id'): 
                     new_topic_id = update.id
                     break
         except Exception as e:
-            print(f"⚠️ Ошибка API (проверяем создание через историю): {e}")
+            print(f"⚠️ Ошибка API при создании: {e}")
 
-        # 3. СТРАХОВКА: Если ID не получили напрямую, ищем в истории группы
+        # Страховка через историю (если API не вернуло ID сразу)
         if not new_topic_id:
-            print("🔍 Ищем тему вручную в истории группы...")
-            await asyncio.sleep(2) # Даем Telegram время "прогрузить" тему
-            # Ищем сервисное сообщение о создании темы
-            async for msg in tg.iter_messages(GROUP_ID, limit=20):
+            await asyncio.sleep(2)
+            async for msg in tg.iter_messages(GROUP_ID, limit=15):
                 if hasattr(msg, 'action') and isinstance(msg.action, types.MessageActionTopicCreate):
-                    # Если в названии темы есть номер телефона — это наша тема!
                     if str(client_id) in msg.action.title:
                         new_topic_id = msg.id
                         break
 
         if new_topic_id:
-            # 4. ЗАПИСЬ В БАЗУ ДАННЫХ
+            # ЗАПИСЬ В БАЗУ: теперь вносим и group_id
             async with aiosqlite.connect(DB_PATH, timeout=10) as db:
                 await db.execute("""
-                    INSERT OR REPLACE INTO client_topics (client_id, topic_id, client_name, messenger)
-                    VALUES (?, ?, ?, ?)
-                """, (str(client_id), new_topic_id, str(client_name), messenger))
+                    INSERT OR REPLACE INTO client_topics 
+                    (client_id, topic_id, client_name, messenger, group_id)
+                    VALUES (?, ?, ?, ?, ?)
+                """, (str(client_id), new_topic_id, str(client_name), messenger, str(GROUP_ID)))
                 await db.commit()
             
-            print(f"✅ Тема {new_topic_id} создана и записана в БД!")
+            print(f"✅ Тема {new_topic_id} привязана к группе {GROUP_ID} в базе")
             return new_topic_id
-        else:
-            print("❌ Не удалось найти ID созданной темы даже в истории")
-            return None
+        
+        return None
             
     except Exception as e:
         print(f"❌ Критическая ошибка в create_new_topic: {e}")
@@ -335,26 +333,45 @@ async def send_text():
         return jsonify({"error": "Не удалось создать ветку в Telegram"}), 500
 
     try:
-        # Развилка: WhatsApp или Telegram
+        # 3. РАЗВИЛКА: WhatsApp или Telegram
         if any(word in messenger for word in ["wa", "whatsapp", "вотсап"]):
+            # --- ОТПРАВКА В WHATSAPP ---
             success, msg_id = await send_whatsapp_message(phone, text)
             used_messenger = "wa"
+            
+            if success:
+                # ДУБЛИРУЕМ В TELEGRAM TOPIC (без имени менеджера)
+                tg = await get_client()
+                wa_report = (
+                    f"🟢 **Отправлено в WhatsApp**\n\n"
+                    f"{text}"
+                )
+                await tg.send_message(GROUP_ID, wa_report, reply_to=topic_id)
+        
         else:
+            # --- ОТПРАВКА В TELEGRAM ---
             tg = await get_client()
-            # Отправляем в конкретный Topic группы
             sent = await tg.send_message(GROUP_ID, text, reply_to=topic_id)
             success, msg_id = True, sent.id
             used_messenger = "tg"
 
+        # 4. ЛОГИРОВАНИЕ
         if success:
-            # Логируем отправку (теперь с topic_id и правильным мессенджером)
             await log_to_db(
-                source="1C", phone=phone, text=text, manager_fio=mgr_fio,
-                direction="out", tg_id=msg_id, topic_id=topic_id, messenger=used_messenger
+                source="1C", 
+                phone=phone, 
+                text=text, 
+                manager_fio=mgr_fio, 
+                direction="out", 
+                tg_id=msg_id, 
+                topic_id=topic_id, 
+                messenger=used_messenger
             )
-            print(f"🚀 Сообщение отправлено в {used_messenger} (Тема: {topic_id})")
             return jsonify({"status": "ok", "topic_id": topic_id}), 200
         else:
+            # Отчет об ошибке в тему тоже сделаем коротким
+            tg = await get_client()
+            await tg.send_message(GROUP_ID, f"🔴 **Ошибка WhatsApp!**\n{msg_id}", reply_to=topic_id)
             return jsonify({"error": msg_id}), 400
 
     except Exception as e:
