@@ -393,6 +393,7 @@ async def start_listener():
                 msg_source = "1C"; m_fio = await find_last_outbound_manager(s_id); m_phone = ""
                 print(f"⬅️ [IN] Темы нет, менеджер из истории: {m_fio}")
             
+            
             await log_to_db(
                             source=msg_source,
                             phone=s_phone, 
