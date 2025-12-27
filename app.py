@@ -129,7 +129,7 @@ async def create_new_topic(client_id, client_name, messenger='tg'):
         if str(client_id) == str(client_name) or "Клиент" in str(client_name):
             topic_title = str(client_name)
         else:
-            topic_title = f"{client_name} ({client_id})"
+            topic_title = f"{client_name} {client_id}"
             
         new_topic_id = None
         print(f"🛠 Создание темы: {topic_title} в группе {GROUP_ID}...")
@@ -176,7 +176,15 @@ async def create_new_topic(client_id, client_name, messenger='tg'):
                 await db.commit()
             
             print(f"✅ Тема {new_topic_id} создана (Группа: {GROUP_ID}, Клиент: {client_name})")
-            return new_topic_id
+            return {
+                "success": True,
+                "topic_id": new_topic_id,
+                "client_id": client_id,
+                "client_name": client_name,
+                "phone": client_id,
+                "messenger": messenger,
+                "group_id": GROUP_ID
+            }
             
     except Exception as e:
         print(f"❌ Критическая ошибка в create_new_topic: {e}")
@@ -213,12 +221,11 @@ async def handler_chat_action(event):
         print(f"⚠️ Ошибка в handler_chat_action: {e}")
 
 async def raw_handler(update):
-    # ПРИНТ ДЛЯ ПРОВЕРКИ: Выводит тип любого входящего сырого события
-    # Если ты удалишь тему и увидишь этот текст — значит мы поймали сигнал!
+   
     print(f"DEBUG: Входящее RAW событие типа: {type(update).__name__}", flush=True)
 
     # 1. Обработка удаления обычных сообщений
-    # 2. Обработка удаления сообщений в каналах/супергруппах (темы живут тут)
+
     target_ids = []
     if hasattr(update, 'messages'):
         target_ids = update.messages
@@ -280,13 +287,6 @@ async def save_tg_media(event):
         return f"{BASE_URL}/get_file/{filename}"
     return None
 
-async def raw_handler(update):
-    # ПРИНТУЕМ ВООБЩЕ ВСЁ, ЧТО ПРИХОДИТ
-    print(f"!!! RAW EVENT: {type(update).__name__}", flush=True)
-    
-    # Если это удаление, выведем подробности
-    if hasattr(update, 'messages'):
-        print(f"!!! IDs involved: {update.messages}", flush=True)
 
 async def start_listener():
 
@@ -393,7 +393,22 @@ async def start_listener():
                 msg_source = "1C"; m_fio = await find_last_outbound_manager(s_id); m_phone = ""
                 print(f"⬅️ [IN] Темы нет, менеджер из истории: {m_fio}")
             
-            await log_to_db(source=msg_source, phone=s_phone, text=raw_text, c_name=s_full_name, c_id=s_id, manager_fio=m_fio, s_number=m_phone, f_url=f_url, direction="in", tg_id=event.message.id)
+            await log_to_db(
+                            source=msg_source,
+                            phone=s_phone, 
+                            text=raw_text, 
+                            c_name=s_full_name, 
+                            c_id=s_id, 
+                            manager_fio=m_fio, 
+                            s_number=m_phone,
+                            messenger='tg',          # Теперь будет записываться 'tg'
+                            f_url=f_url,
+                            status="ok",             # Добавили значение "ok"
+                            direction="in",
+                            tg_id=event.message.id,
+                            topic_id=row['topic_id'] if row else None, # Берем ID из найденной темы
+                            group_id=GROUP_ID
+                            )
 
     await tg.run_until_disconnected()
     
@@ -423,10 +438,11 @@ async def send_text():
         topic_id = topic_info['topic_id']
     else:
         # Передаем уже проверенное имя c_name
-        topic_id = await create_new_topic(phone, c_name, messenger=messenger)
+        topic_info = await create_new_topic(phone, c_name, messenger=messenger)
+        topic_id = topic_info['topic_id']   
 
     if not topic_id:
-        return jsonify({"error": "Не удалось создать ветку в Telegram"}), 500
+        return jsonify({"error": "Не удалось создать диалог в Telegram"}), 500
 
     try:
         # 3. РАЗВИЛКА: WhatsApp или Telegram
@@ -439,7 +455,7 @@ async def send_text():
                 # ДУБЛИРУЕМ В TELEGRAM TOPIC (без имени менеджера)
                 tg = await get_client()
                 wa_report = (
-                    f"🟢 **Отправлено в WhatsApp**\n\n"
+                    f"🟢 **WhatsApp**\n\n"
                     f"{text}"
                 )
                 await tg.send_message(GROUP_ID, wa_report, reply_to=topic_id)
@@ -460,7 +476,9 @@ async def send_text():
                 manager_fio=mgr_fio, 
                 direction="out", 
                 tg_id=msg_id, 
-                topic_id=topic_id, 
+                topic_id=topic_id,
+                client_name=topic_info['client_name'],
+                client_id=topic_info['client_id'],
                 messenger=used_messenger
             )
             return jsonify({"status": "ok", "topic_id": topic_id}), 200
