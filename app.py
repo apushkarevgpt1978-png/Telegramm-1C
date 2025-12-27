@@ -119,18 +119,31 @@ async def create_new_topic(client_id, client_name, messenger='tg'):
     try:
         tg = await get_client()
         topic_title = f"{client_name} ({client_id})" if client_id != client_name else client_name
+        new_topic_id = None
+
+        try:
+            # Пытаемся создать тему
+            result = await tg(functions.messages.CreateForumTopicRequest(
+                peer=GROUP_ID,
+                title=topic_title
+            ))
+            # Если все ок, берем ID из ответа
+            new_topic_id = result.updates[0].message.id
+        except Exception as e:
+            # Если вылетела ошибка Constructor ID или любая другая при создании
+            print(f"⚠️ Запрос создания вызвал ошибку, проверяем создалась ли тема: {e}")
+            await asyncio.sleep(1.5) # Даем время Telegram обновить кэш
+            
+            # Просто ищем тему с таким названием в группе
+            async for topic in tg.iter_forum_topics(GROUP_ID, search=client_id):
+                new_topic_id = topic.id
+                break
         
-        # ИСПРАВЛЕННЫЙ ВЫЗОВ:
-        # 1. Используем functions.messages вместо functions.channels
-        # 2. Используем peer= вместо channel=
-        result = await tg(functions.messages.CreateForumTopicRequest(
-            peer=GROUP_ID,
-            title=topic_title
-        ))
-        
-        # ID новой темы (сообщения-заголовка)
-        new_topic_id = result.updates[0].message.id
-        
+        if not new_topic_id:
+            print("❌ Не удалось получить ID темы даже через поиск")
+            return None
+
+        # Сохраняем в базу
         async with aiosqlite.connect(DB_PATH, timeout=10) as db:
             await db.execute("""
                 INSERT OR REPLACE INTO client_topics (client_id, topic_id, client_name, messenger)
@@ -138,11 +151,11 @@ async def create_new_topic(client_id, client_name, messenger='tg'):
             """, (str(client_id), new_topic_id, str(client_name), messenger))
             await db.commit()
             
-        print(f"✅ Создана новая тема {new_topic_id} для {client_id}")
+        print(f"✅ Тема готова! ID: {new_topic_id} для {client_id}")
         return new_topic_id
         
     except Exception as e:
-        print(f"❌ Ошибка создания темы: {e}")
+        print(f"❌ Критическая ошибка в create_new_topic: {e}")
         return None
 
 async def get_topic_info_with_retry(phone_number):
