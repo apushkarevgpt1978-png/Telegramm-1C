@@ -120,20 +120,27 @@ async def create_new_topic(client_id, client_name, messenger='tg'):
         tg = await get_client()
         topic_title = f"{client_name} ({client_id})" if client_id != client_name else client_name
         
+        # ИСПРАВЛЕННЫЙ ВЫЗОВ:
+        # 1. Используем functions.messages вместо functions.channels
+        # 2. Используем peer= вместо channel=
         result = await tg(functions.messages.CreateForumTopicRequest(
-        peer=GROUP_ID, # И замени 'channel' на 'peer' — это стандарт для этого запроса
-        title=topic_title
+            peer=GROUP_ID,
+            title=topic_title
         ))
+        
+        # ID новой темы (сообщения-заголовка)
         new_topic_id = result.updates[0].message.id
         
         async with aiosqlite.connect(DB_PATH, timeout=10) as db:
-            # Используем INSERT OR REPLACE, чтобы обновить старую запись, если она была
             await db.execute("""
                 INSERT OR REPLACE INTO client_topics (client_id, topic_id, client_name, messenger)
                 VALUES (?, ?, ?, ?)
             """, (str(client_id), new_topic_id, str(client_name), messenger))
             await db.commit()
+            
+        print(f"✅ Создана новая тема {new_topic_id} для {client_id}")
         return new_topic_id
+        
     except Exception as e:
         print(f"❌ Ошибка создания темы: {e}")
         return None
