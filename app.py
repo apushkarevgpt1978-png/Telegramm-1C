@@ -271,10 +271,7 @@ async def save_tg_media(event):
 
 async def start_listener():
 
-    print(f"начинаем слушать")
     tg = await get_client()
-
-    print(f"слушаем")
 
     tg.add_event_handler(handler_chat_action, events.ChatAction)
     
@@ -510,8 +507,11 @@ async def get_file(filename): return await send_from_directory(FILES_DIR, filena
 
 @app.before_serving
 async def startup():
+    print("🚀 [STARTUP] Инициализация приложения началась...", flush=True)
     await init_db()
+    # Запускаем слушатель как отдельную фоновую задачу
     asyncio.create_task(start_listener())
+    print("🚀 [STARTUP] Задача start_listener отправлена в event loop", flush=True)
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000)
