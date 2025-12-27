@@ -274,18 +274,56 @@ async def start_listener():
 @app.route('/send', methods=['POST'])
 async def send_text():
     data = await request.get_json()
-    phone, text, mgr_fio = str(data.get("phone", "")).lstrip('+').strip(), data.get("text", ""), str(data.get("manager", ""))
-    tg = await get_client()
+    # 1. Парсим данные
+    phone = str(data.get("phone", "")).lstrip('+').strip()
+    text = data.get("text", "")
+    mgr_fio = str(data.get("manager", ""))
+    # Проверяем мессенджер из 1С (приводим к нижнему регистру)
+    messenger = str(data.get("messenger", "tg")).lower()
+
+    # 2. Ищем или создаем тему (Topic)
+    topic_info = await get_topic_info_with_retry(phone)
+    if topic_info and topic_info.get('topic_id'):
+        topic_id = topic_info['topic_id']
+    else:
+        # Если темы нет - создаем её
+        topic_id = await create_new_topic(phone, phone, messenger=messenger)
+
+    if not topic_id:
+        return jsonify({"error": "Не удалось найти или создать тему в ТГ"}), 500
+
     try:
-        ent = await tg.get_entity(phone)
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("DELETE FROM client_topics WHERE client_id = ?", (str(ent.id),))
-            await db.commit()
-        sent = await tg.send_message(ent, text)
-        await log_to_db(source="1C", phone=phone, c_name=f"{ent.first_name or ''}", text=text, c_id=str(ent.id), manager_fio=mgr_fio, direction="out", tg_id=sent.id)
-        print(f"🚀 [API] Текст отправлен клиенту {ent.id}")
-        return jsonify({"status": "ok"}), 200
-    except Exception as e: return jsonify({"error": str(e)}), 500
+        # 3. РАЗВИЛКА: WhatsApp или Telegram
+        if any(word in messenger for word in ["wa", "whatsapp", "вотсап"]):
+            # ОТПРАВКА В WHATSAPP
+            success, msg_id = await send_whatsapp_message(phone, text)
+            used_messenger = "wa"
+        else:
+            # ОТПРАВКА В TELEGRAM (в конкретный Topic)
+            tg = await get_client()
+            sent = await tg.send_message(GROUP_ID, text, reply_to=topic_id)
+            success, msg_id = True, sent.id
+            used_messenger = "tg"
+
+        # 4. ЛОГИРОВАНИЕ
+        if success:
+            await log_to_db(
+                source="1C", 
+                phone=phone, 
+                text=text, 
+                manager_fio=mgr_fio, 
+                direction="out", 
+                tg_id=msg_id, 
+                topic_id=topic_id, 
+                messenger=used_messenger
+            )
+            return jsonify({"status": "ok", "topic_id": topic_id}), 200
+        else:
+            return jsonify({"error": msg_id}), 400
+
+    except Exception as e:
+        print(f"❌ Ошибка в send_text: {e}")
+        return jsonify({"error": str(e)}), 500
 
 @app.route('/send_file', methods=['POST'])
 async def send_file():
