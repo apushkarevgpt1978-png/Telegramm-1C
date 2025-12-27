@@ -1,4 +1,4 @@
-import os, asyncio, aiosqlite, re, uuid
+import os, asyncio, aiosqlite, re, uuid, httpx
 from datetime import datetime
 from quart import Quart, request, jsonify, send_from_directory
 from telethon import TelegramClient, events, functions, types, errors
@@ -6,8 +6,15 @@ from telethon import TelegramClient, events, functions, types, errors
 app = Quart(__name__)
 
 # --- CONFIG ---
+# Данные Telegram
 API_ID = int(os.environ.get('API_ID', 0))
 API_HASH = os.environ.get('API_HASH', '')
+
+# Данные для Green-API (WhatsApp)
+# Добавляем пустую строку как значение по умолчанию, чтобы код не упал при запуске
+WA_ID_INSTANCE = os.environ.get("WA_ID_INSTANCE", "")
+WA_API_TOKEN = os.environ.get("WA_API_TOKEN", "")
+
 SESSION_PATH = os.environ.get('TG_SESSION_PATH', '/app/data/GenaAPI')
 DB_PATH = os.environ.get('DB_PATH', '/app/data/gateway_messages.db')
 FILES_DIR = '/app/files'
@@ -108,37 +115,49 @@ async def log_to_db(source, phone, text, c_name=None, c_id=None, manager_fio=Non
     except Exception as e: 
         print(f"⚠️ DB Error: {e}")
 
-async def get_topic_info_with_retry(phone_number):
-    """
-    Ищет тему в базе по номеру телефона и проверяет её наличие в Telegram.
-    Ревизия (удаление) отключена.
-    """
-    # Очищаем номер телефона от лишних символов, если нужно (оставляем только цифры)
-    clean_phone = str(''.join(filter(str.isdigit, str(phone_number))))
+async def create_new_topic(client_id, client_name, messenger='tg'):
+    try:
+        tg = await get_client()
+        topic_title = f"{client_name} ({client_id})" if client_id != client_name else client_name
+        
+        result = await tg(functions.channels.CreateForumTopicRequest(
+            channel=GROUP_ID,
+            title=topic_title
+        ))
+        new_topic_id = result.updates[0].message.id
+        
+        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+            # Используем INSERT OR REPLACE, чтобы обновить старую запись, если она была
+            await db.execute("""
+                INSERT OR REPLACE INTO client_topics (client_id, topic_id, client_name, messenger)
+                VALUES (?, ?, ?, ?)
+            """, (str(client_id), new_topic_id, str(client_name), messenger))
+            await db.commit()
+        return new_topic_id
+    except Exception as e:
+        print(f"❌ Ошибка создания темы: {e}")
+        return None
 
+async def get_topic_info_with_retry(phone_number):
+    clean_phone = str(''.join(filter(str.isdigit, str(phone_number))))
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
         db.row_factory = aiosqlite.Row
-        # Ищем строго по номеру телефона (client_id)
-        query = "SELECT * FROM client_topics WHERE client_id = ?"
-        
-        async with db.execute(query, (clean_phone,)) as cursor:
+        async with db.execute("SELECT * FROM client_topics WHERE client_id = ?", (clean_phone,)) as cursor:
             row = await cursor.fetchone()
             if not row:
-                return None
-            
+                return None  # Клиента вообще нет в базе
+
+            client_data = dict(row)
             try:
                 tg = await get_client()
-                # Проверяем, существует ли тема в Telegram физически
-                res = await tg.get_messages(GROUP_ID, ids=int(row['topic_id']))
-                
-                if res and not isinstance(res, types.MessageEmpty):
-                    return dict(row)
-                else:
-                    # Если в TG темы нет, просто возвращаем None, не удаляя из базы
-                    return None
+                res = await tg.get_messages(GROUP_ID, ids=int(client_data['topic_id']))
+                # Если тема в ТГ "битая" или пустая
+                if not res or isinstance(res, types.MessageEmpty):
+                    client_data['topic_id'] = None # Сигнал к пересозданию
+                return client_data
             except Exception:
-                # В случае любой ошибки связи с TG просто возвращаем None
-                return None
+                # Если ТГ недоступен, возвращаем что есть в базе
+                return client_data
 
 async def find_last_outbound_manager(c_id):
     try:
@@ -283,6 +302,29 @@ async def send_file():
         print(f"🚀 [API] Файл отправлен клиенту {ent.id}")
         return jsonify({"status": "ok"}), 200
     except Exception as e: return jsonify({"error": str(e)}), 500
+
+async def send_whatsapp_message(phone, text):
+    """Отправляет сообщение через Green-API, используя httpx"""
+    url = f"https://api.green-api.com/waInstance{WA_ID_INSTANCE}/sendMessage/{WA_API_TOKEN}"
+    payload = {
+        "chatId": f"{phone}@c.us",
+        "message": text
+    }
+    
+    try:
+        # В httpx используется AsyncClient
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.post(url, json=payload)
+            
+            if response.status_code == 200:
+                result = response.json()
+                return True, result.get("idMessage")
+            else:
+                return False, f"Ошибка WA: {response.status_code} - {response.text}"
+                
+    except Exception as e:
+        print(f"❌ Исключение при отправке WA: {e}")
+        return False, str(e)
 
 @app.route('/fetch_new', methods=['GET', 'POST'])
 async def fetch_new():
