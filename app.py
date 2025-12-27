@@ -281,19 +281,12 @@ async def save_tg_media(event):
     return None
 
 async def raw_handler(update):
-    # Ловим именно удаление сообщений в канале/супергруппе (это и есть удаление темы)
-    if isinstance(update, (types.UpdateDeleteChannelMessages, types.UpdateDeleteMessages)):
-        # Получаем список ID удаленных сообщений
-        msg_ids = update.messages if hasattr(update, 'messages') else []
-        if msg_ids:
-            print(f"🗑️ [RAW-LOG] Замечено удаление ID: {msg_ids}", flush=True)
-            async with aiosqlite.connect(DB_PATH, timeout=10) as db:
-                for m_id in msg_ids:
-                    # Пытаемся удалить запись, если этот ID был заглавным ID темы
-                    cursor = await db.execute("DELETE FROM client_topics WHERE topic_id = ?", (m_id,))
-                    if cursor.rowcount > 0:
-                        print(f"✅ [DB] Тема {m_id} успешно удалена из базы", flush=True)
-                await db.commit()
+    # ПРИНТУЕМ ВООБЩЕ ВСЁ, ЧТО ПРИХОДИТ
+    print(f"!!! RAW EVENT: {type(update).__name__}", flush=True)
+    
+    # Если это удаление, выведем подробности
+    if hasattr(update, 'messages'):
+        print(f"!!! IDs involved: {update.messages}", flush=True)
 
 async def start_listener():
 
