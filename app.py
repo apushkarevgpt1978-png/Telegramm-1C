@@ -170,6 +170,40 @@ async def create_new_topic(client_id, client_name, messenger='tg'):
         print(f"❌ Критическая ошибка в create_new_topic: {e}")
         return None
 
+# Обработчик сервисных действий в чате (удаление тем)
+@client.on(events.ChatAction)
+async def handler_chat_action(event):
+    try:
+        # Проверяем, является ли действие удалением темы форума
+        if event.is_group and event.action_deleted:
+            # Получаем ID удаленной темы
+            # В Telethon удаление темы часто приходит через event.action_message.id или event.message.id
+            deleted_topic_id = getattr(event.action_message, 'id', None)
+            
+            if deleted_topic_id:
+                async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+                    # Удаляем запись из базы по topic_id
+                    cursor = await db.execute(
+                        "DELETE FROM client_topics WHERE topic_id = ?", 
+                        (deleted_topic_id,)
+                    )
+                    await db.commit()
+                    
+                    if cursor.rowcount > 0:
+                        print(f"🗑 Тема {deleted_topic_id} удалена из Telegram и очищена в БД")
+    except Exception as e:
+        print(f"⚠️ Ошибка при обработке удаления темы: {e}")
+
+# Дополнительный обработчик для точного отлова удаления тем (через Raw Updates)
+@client.on(events.Raw(types.UpdateTimeline) if hasattr(types, 'UpdateTimeline') else events.Raw())
+async def raw_handler(update):
+    if isinstance(update, types.UpdateDeleteMessages):
+        # Если удаляются сообщения, проверяем, не были ли это сервисные сообщения тем
+        async with aiosqlite.connect(DB_PATH) as db:
+            for msg_id in update.messages:
+                await db.execute("DELETE FROM client_topics WHERE topic_id = ?", (msg_id,))
+            await db.commit()
+
 async def get_topic_info_with_retry(phone_number):
     clean_phone = str(''.join(filter(str.isdigit, str(phone_number))))
     async with aiosqlite.connect(DB_PATH, timeout=10) as db:
