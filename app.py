@@ -64,6 +64,7 @@ async def init_db():
                 file_url TEXT, 
                 status TEXT DEFAULT 'pending', 
                 tg_message_id INTEGER,
+                group_id TEXT,
                 topic_id INTEGER, -- Наша новая колонка
                 direction TEXT, 
                 error_text TEXT, 
@@ -80,21 +81,25 @@ async def init_db():
                 client_name TEXT, 
                 phone TEXT, 
                 manager_ref TEXT,
+                group_id TEXT,
                 messenger TEXT DEFAULT 'tg' -- Наша новая колонка
             )
         """)
         await db.commit()
         print("✅ База данных (структура) актуализирована")
 
-async def log_to_db(source, phone, text, c_name=None, c_id=None, manager_fio=None, s_number=None, f_url=None, direction='in', tg_id=None, topic_id=None, messenger='tg'):
-    """Логирует сообщение в базу данных, включая ID темы (topic_id)"""
+async def log_to_db(source, phone, text, c_name=None, c_id=None, manager_fio=None, s_number=None, f_url=None, direction='in', tg_id=None, topic_id=None, messenger='tg', group_id=None):
+    """Логирует сообщение в базу данных, включая ID темы и ID группы"""
     created_at = datetime.now()
+    # Если group_id не передан явно, используем дефолтный из констант
+    g_id = str(group_id or GROUP_ID)
+    
     try:
         async with aiosqlite.connect(DB_PATH, timeout=10) as db:
             await db.execute("""
                 INSERT INTO outbound_logs 
-                (source, phone, client_name, client_id, manager, sender_number, messenger, message_text, file_url, status, direction, tg_message_id, topic_id, created_at) 
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (source, phone, client_name, client_id, manager, sender_number, messenger, message_text, file_url, status, direction, tg_message_id, topic_id, group_id, created_at) 
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 str(source), 
                 str(phone or ""), 
@@ -102,18 +107,19 @@ async def log_to_db(source, phone, text, c_name=None, c_id=None, manager_fio=Non
                 str(c_id or ""), 
                 str(manager_fio or ""), 
                 str(s_number or ""), 
-                str(messenger), # Теперь передаем переменную вместо жесткого 'tg'
+                str(messenger), 
                 str(text or ""), 
                 f_url, 
                 'pending', 
                 direction, 
                 tg_id, 
-                topic_id, # Добавленный ID темы
+                topic_id, 
+                g_id, # Добавили ID группы в логи
                 created_at
             ))
             await db.commit()
     except Exception as e: 
-        print(f"⚠️ DB Error: {e}")
+        print(f"⚠️ DB Error (log_to_db): {e}")
 
 async def create_new_topic(client_id, client_name, messenger='tg'):
     try:
