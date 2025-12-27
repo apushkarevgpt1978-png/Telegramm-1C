@@ -88,8 +88,10 @@ async def init_db():
         await db.commit()
         print("✅ База данных (структура) актуализирована")
 
-async def log_to_db(source, phone, text, c_name=None, c_id=None, manager_fio=None, s_number=None, f_url=None, direction='in', tg_id=None, topic_id=None, messenger='tg', group_id=None):
-    """Логирует сообщение в базу данных, включая ID темы и ID группы"""
+async def log_to_db(source, phone, text, c_name=None, c_id=None, manager_fio=None, 
+                    s_number=None, f_url=None, direction="out", tg_id=None, 
+                    status="ok", error="", topic_id=None, group_id=None, messenger='tg'):
+    
     created_at = datetime.now()
     # Если group_id не передан явно, используем дефолтный из констант
     g_id = str(group_id or GROUP_ID)
