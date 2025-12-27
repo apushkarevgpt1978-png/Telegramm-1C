@@ -273,11 +273,15 @@ async def start_listener():
 
     tg = await get_client()
 
+    # 1. Сначала регистрируем обработчики
+    tg.add_event_handler(raw_handler, events.Raw(types.UpdateDeleteMessages))
     tg.add_event_handler(handler_chat_action, events.ChatAction)
     
-    tg.add_event_handler(raw_handler, events.Raw(types.UpdateDeleteMessages))
+    # 2. Только потом пишем, что всё готово
+    print("✅ [LISTENER] Обработчики подключены", flush=True)
     
-    print("✅ Обработчики событий успешно подключены")
+    # 3. И обязательно "якорь", чтобы задача не завершилась
+    await tg.run_until_disconnected()
 
     @tg.on(events.ChatAction)
     async def action_handler(event):
