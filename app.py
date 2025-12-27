@@ -184,23 +184,30 @@ async def create_new_topic(client_id, client_name, messenger='tg'):
 
 async def handler_chat_action(event):
     try:
-        # Проверяем, является ли действие удалением темы форума
-        if event.is_group and event.action_deleted:
-            # Получаем ID удаленной темы
-            # В Telethon удаление темы часто приходит через event.action_message.id или event.message.id
-            deleted_topic_id = getattr(event.action_message, 'id', None)
+        # 1. Проверяем удаление через action_message (стандартный ChatAction)
+        deleted_topic_id = None
+        
+        if event.action_message and isinstance(event.action_message.action, types.MessageActionTopicDelete):
+            # Самый точный способ получить ID темы
+            deleted_topic_id = event.action_message.reply_to.reply_to_msg_id
+            print(f"🔍 Поймано удаление темы через MessageActionTopicDelete: {deleted_topic_id}")
             
-            if deleted_topic_id:
-                async with aiosqlite.connect(DB_PATH, timeout=10) as db:
-                    # Удаляем запись из базы по topic_id
-                    cursor = await db.execute(
-                        "DELETE FROM client_topics WHERE topic_id = ?", 
-                        (deleted_topic_id,)
-                    )
-                    await db.commit()
+        elif event.action_deleted:
+            # Запасной вариант для некоторых типов чатов
+            deleted_topic_id = getattr(event.action_message, 'id', None)
+            print(f"🔍 Поймано удаление темы через action_deleted: {deleted_topic_id}")
+
+        # 2. Если ID найден — удаляем из базы
+        if deleted_topic_id:
+            async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+                cursor = await db.execute("DELETE FROM client_topics WHERE topic_id = ?", (deleted_topic_id,))
+                await db.commit()
+                
+                if cursor.rowcount > 0:
+                    print(f"🗑️ [БАЗА] Тема {deleted_topic_id} успешно удалена из таблицы client_topics")
+                else:
+                    print(f"ℹ️ Тема {deleted_topic_id} удалена в TG, но в базе её не было")
                     
-                    if cursor.rowcount > 0:
-                        print(f"🗑 Тема {deleted_topic_id} удалена из Telegram и очищена в БД")
     except Exception as e:
         print(f"⚠️ Ошибка при обработке удаления темы: {e}")
 
