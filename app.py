@@ -213,11 +213,14 @@ async def handler_chat_action(event):
         print(f"⚠️ Ошибка в handler_chat_action: {e}")
 
 async def raw_handler(update):
+    # UpdateDeleteMessages — это событие, которое летит при удалении сообщений или ТЕМ
     if isinstance(update, types.UpdateDeleteMessages):
-        # Если удаляются сообщения, проверяем, не были ли это сервисные сообщения тем
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
             for msg_id in update.messages:
-                await db.execute("DELETE FROM client_topics WHERE topic_id = ?", (msg_id,))
+                # Проверяем, был ли этот ID у нас в базе как topic_id
+                cursor = await db.execute("DELETE FROM client_topics WHERE topic_id = ?", (msg_id,))
+                if cursor.rowcount > 0:
+                    print(f"🗑️ [RAW] Поймано удаление ID {msg_id}. Запись удалена из базы.")
             await db.commit()
 
 async def get_topic_info_with_retry(phone_number):
@@ -269,8 +272,8 @@ async def save_tg_media(event):
 async def start_listener():
     tg = await get_client()
 
-    # Регистрация обработчиков вручную (чтобы не было NoneType)
     tg.add_event_handler(handler_chat_action, events.ChatAction)
+    
     tg.add_event_handler(raw_handler, events.Raw(types.UpdateDeleteMessages))
     
     print("✅ Обработчики событий успешно подключены")
