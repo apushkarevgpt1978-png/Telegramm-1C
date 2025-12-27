@@ -284,21 +284,12 @@ async def start_listener():
 
     tg = await get_client()
 
-    # 1. Сначала регистрируем обработчики
-    # Регистрируем raw_handler БЕЗ фильтрации внутри Raw(), 
-    # чтобы он ловил вообще все типы обновлений
     tg.add_event_handler(raw_handler, events.Raw) 
-    
-    print("✅ [LISTENER] Широкополосный RAW-слушатель запущен", flush=True)
-    await tg.run_until_disconnected()
     
     tg.add_event_handler(handler_chat_action, events.ChatAction)
     
     # 2. Только потом пишем, что всё готово
     print("✅ [LISTENER] Обработчики подключены", flush=True)
-    
-    # 3. И обязательно "якорь", чтобы задача не завершилась
-    await tg.run_until_disconnected()
 
     @tg.on(events.ChatAction)
     async def action_handler(event):
@@ -395,6 +386,9 @@ async def start_listener():
                 print(f"⬅️ [IN] Темы нет, менеджер из истории: {m_fio}")
             
             await log_to_db(source=msg_source, phone=s_phone, text=raw_text, c_name=s_full_name, c_id=s_id, manager_fio=m_fio, s_number=m_phone, f_url=f_url, direction="in", tg_id=event.message.id)
+
+    await tg.run_until_disconnected()
+    
 
 # --- API ROUTES ---
 @app.route('/send', methods=['POST'])
