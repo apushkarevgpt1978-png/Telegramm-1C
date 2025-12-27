@@ -213,14 +213,25 @@ async def handler_chat_action(event):
         print(f"⚠️ Ошибка в handler_chat_action: {e}")
 
 async def raw_handler(update):
-    # UpdateDeleteMessages — это событие, которое летит при удалении сообщений или ТЕМ
-    if isinstance(update, types.UpdateDeleteMessages):
+    # ПРИНТ ДЛЯ ПРОВЕРКИ: Выводит тип любого входящего сырого события
+    # Если ты удалишь тему и увидишь этот текст — значит мы поймали сигнал!
+    print(f"DEBUG: Входящее RAW событие типа: {type(update).__name__}", flush=True)
+
+    # 1. Обработка удаления обычных сообщений
+    # 2. Обработка удаления сообщений в каналах/супергруппах (темы живут тут)
+    target_ids = []
+    if hasattr(update, 'messages'):
+        target_ids = update.messages
+    elif hasattr(update, 'id'): # Иногда приходит одиночный ID
+        target_ids = [update.id]
+
+    if target_ids:
+        print(f"🗑️ [RAW] Замечено удаление ID: {target_ids}", flush=True)
         async with aiosqlite.connect(DB_PATH, timeout=10) as db:
-            for msg_id in update.messages:
-                # Проверяем, был ли этот ID у нас в базе как topic_id
+            for msg_id in target_ids:
                 cursor = await db.execute("DELETE FROM client_topics WHERE topic_id = ?", (msg_id,))
                 if cursor.rowcount > 0:
-                    print(f"🗑️ [RAW] Поймано удаление ID {msg_id}. Запись удалена из базы.")
+                    print(f"✅ [БАЗА] Тема {msg_id} удалена из БД", flush=True)
             await db.commit()
 
 async def get_topic_info_with_retry(phone_number):
@@ -274,7 +285,13 @@ async def start_listener():
     tg = await get_client()
 
     # 1. Сначала регистрируем обработчики
-    tg.add_event_handler(raw_handler, events.Raw(types.UpdateDeleteMessages))
+    # Регистрируем raw_handler БЕЗ фильтрации внутри Raw(), 
+    # чтобы он ловил вообще все типы обновлений
+    tg.add_event_handler(raw_handler, events.Raw) 
+    
+    print("✅ [LISTENER] Широкополосный RAW-слушатель запущен", flush=True)
+    await tg.run_until_disconnected()
+    
     tg.add_event_handler(handler_chat_action, events.ChatAction)
     
     # 2. Только потом пишем, что всё готово
