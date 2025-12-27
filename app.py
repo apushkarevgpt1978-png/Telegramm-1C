@@ -301,10 +301,23 @@ async def start_listener():
                     topic_id = next((u.id for u in res.updates if hasattr(u, 'id')), None)
                     if topic_id:
                         async with aiosqlite.connect(DB_PATH) as db:
-                            await db.execute("INSERT OR REPLACE INTO client_topics (client_id, topic_id, client_name, phone, manager_ref) VALUES (?, ?, ?, ?, ?)",
-                                           (str(ent.id), topic_id, c_name_input, t_phone, s_phone))
+                            await db.execute("""
+                                INSERT OR REPLACE INTO client_topics 
+                                (client_id, topic_id, client_name, phone, manager_ref, messenger, group_id) 
+                                VALUES (?, ?, ?, ?, ?, ?, ?)
+                            """, (
+                                str(ent.id),       # client_id
+                                topic_id,          # topic_id
+                                c_name_input,      # client_name
+                                t_phone,           # phone
+                                s_phone,           # manager_ref (кто создал)
+                                'tg',              # messenger
+                                str(GROUP_ID)      # group_id
+                            ))
                             await db.commit()
-                        await event.reply(f"✅ Тема создана для {t_phone}")
+                        await event.reply(f"✅ Тема создана и привязана к группе {GROUP_ID}")
+
+
                 except Exception as e: await event.reply(f"❌ Ошибка: {str(e)}")
                 return
 
