@@ -184,32 +184,33 @@ async def create_new_topic(client_id, client_name, messenger='tg'):
 
 async def handler_chat_action(event):
     try:
-        # 1. Проверяем удаление через action_message (стандартный ChatAction)
         deleted_topic_id = None
         
-        if event.action_message and isinstance(event.action_message.action, types.MessageActionTopicDelete):
-            # Самый точный способ получить ID темы
-            deleted_topic_id = event.action_message.reply_to.reply_to_msg_id
-            print(f"🔍 Поймано удаление темы через MessageActionTopicDelete: {deleted_topic_id}")
-            
-        elif event.action_deleted:
-            # Запасной вариант для некоторых типов чатов
-            deleted_topic_id = getattr(event.action_message, 'id', None)
-            print(f"🔍 Поймано удаление темы через action_deleted: {deleted_topic_id}")
+        # Способ №1: Если это прямое сервисное сообщение об удалении темы
+        if event.action_message and hasattr(event.action_message, 'action'):
+            if isinstance(event.action_message.action, types.MessageActionTopicDelete):
+                # ID темы в данном случае лежит в reply_to
+                if event.action_message.reply_to:
+                    deleted_topic_id = event.action_message.reply_to.reply_to_msg_id
+                print(f"🔍 Нашел ID темы через MessageActionTopicDelete: {deleted_topic_id}")
 
-        # 2. Если ID найден — удаляем из базы
+        # Способ №2: Если пришло событие удаления сообщения (тема — это по сути сообщение №1)
+        if not deleted_topic_id and event.action_deleted:
+            deleted_topic_id = getattr(event.action_message, 'id', None)
+            print(f"🔍 Нашел ID темы через action_deleted: {deleted_topic_id}")
+
+        # Если нашли ID — чистим базу
         if deleted_topic_id:
             async with aiosqlite.connect(DB_PATH, timeout=10) as db:
                 cursor = await db.execute("DELETE FROM client_topics WHERE topic_id = ?", (deleted_topic_id,))
                 await db.commit()
-                
                 if cursor.rowcount > 0:
-                    print(f"🗑️ [БАЗА] Тема {deleted_topic_id} успешно удалена из таблицы client_topics")
+                    print(f"🗑️ [БАЗА] Запись для темы {deleted_topic_id} удалена")
                 else:
-                    print(f"ℹ️ Тема {deleted_topic_id} удалена в TG, но в базе её не было")
+                    print(f"ℹ️ Событие удаления темы {deleted_topic_id} получено, но в базе такой записи нет")
                     
     except Exception as e:
-        print(f"⚠️ Ошибка при обработке удаления темы: {e}")
+        print(f"⚠️ Ошибка в handler_chat_action: {e}")
 
 async def raw_handler(update):
     if isinstance(update, types.UpdateDeleteMessages):
