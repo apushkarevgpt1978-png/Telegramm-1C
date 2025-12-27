@@ -284,21 +284,19 @@ async def start_listener():
 
     tg = await get_client()
 
-    tg.add_event_handler(raw_handler, events.Raw) 
-    
-    tg.add_event_handler(handler_chat_action, events.ChatAction)
-    
-    # 2. Только потом пишем, что всё готово
-    print("✅ [LISTENER] Обработчики подключены", flush=True)
+    print("⏳ [LISTENER] Подключение и настройка...", flush=True)
 
+    # 1. ОБРАБОТЧИК СОБЫТИЙ ЧАТА (Удаление тем ловим тут)
     @tg.on(events.ChatAction)
     async def action_handler(event):
+        # Ловим сервисное сообщение об удалении темы
         if event.action_message and isinstance(event.action_message.action, types.MessageActionTopicDelete):
             t_id = event.action_message.reply_to.reply_to_msg_id
+            print(f"🗑️ Обнаружено удаление диалога {t_id}, чищу базу...", flush=True)
             async with aiosqlite.connect(DB_PATH) as db:
                 await db.execute("DELETE FROM client_topics WHERE topic_id = ?", (t_id,))
                 await db.commit()
-                print(f"🗑️ Тема {t_id} удалена из БД по событию TG")
+                print(f"✅ Диалог {t_id} удален")
 
     @tg.on(events.NewMessage())
     async def handler(event):
@@ -339,7 +337,7 @@ async def start_listener():
                                 str(GROUP_ID)      # group_id
                             ))
                             await db.commit()
-                        await event.reply(f"✅ Тема создана и привязана к группе {GROUP_ID}")
+                        await event.reply(f"✅ Диалог в группе{GROUP_ID} создан")
 
 
                 except Exception as e: await event.reply(f"❌ Ошибка: {str(e)}")
