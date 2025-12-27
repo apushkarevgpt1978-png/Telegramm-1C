@@ -274,11 +274,11 @@ async def start_listener():
 @app.route('/send', methods=['POST'])
 async def send_text():
     data = await request.get_json()
-    # 1. Парсим данные
+    
+    # 1. Парсим данные (удалили дубли)
     phone = str(data.get("phone", "")).lstrip('+').strip()
     text = data.get("text", "")
     mgr_fio = str(data.get("manager", ""))
-    # Проверяем мессенджер из 1С (приводим к нижнему регистру)
     messenger = str(data.get("messenger", "tg")).lower()
 
     # 2. Ищем или создаем тему (Topic)
@@ -286,7 +286,6 @@ async def send_text():
     if topic_info and topic_info.get('topic_id'):
         topic_id = topic_info['topic_id']
     else:
-        # Если темы нет - создаем её
         topic_id = await create_new_topic(phone, phone, messenger=messenger)
 
     if not topic_id:
@@ -299,7 +298,7 @@ async def send_text():
             success, msg_id = await send_whatsapp_message(phone, text)
             used_messenger = "wa"
         else:
-            # ОТПРАВКА В TELEGRAM (в конкретный Topic)
+            # ОТПРАВКА В TELEGRAM (в конкретный Topic группы!)
             tg = await get_client()
             sent = await tg.send_message(GROUP_ID, text, reply_to=topic_id)
             success, msg_id = True, sent.id
@@ -317,6 +316,7 @@ async def send_text():
                 topic_id=topic_id, 
                 messenger=used_messenger
             )
+            print(f"🚀 [API] Сообщение отправлено через {used_messenger}")
             return jsonify({"status": "ok", "topic_id": topic_id}), 200
         else:
             return jsonify({"error": msg_id}), 400
